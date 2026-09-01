@@ -12,7 +12,11 @@ Tier 2（跨 skill 相似度）与 Tier 3（沙箱实跑）在数据模型上预
 uv venv --python 3.13 .venv
 uv pip install --python .venv/bin/python -e ".[dev]"
 cp .env.example .env
+.venv/bin/alembic upgrade head
 ```
+
+最后一步建库结构。**服务不会自动建表**——自动建表会掩盖"改了模型忘了生成
+迁移"这类问题，见下方数据库结构一节。
 
 SkillEvaluator **独立安装**，不要装进本服务的 venv（原因见下）：
 
@@ -129,6 +133,36 @@ worker 另起一个进程：
 不同 validator 输出的 `file_path` 形式不一致：安全扫描给 `SKILL.md`，
 schema 检查给物化目录的绝对路径。后者含任务 UUID，原样传给管理系统
 对使用者毫无意义，因此 adapter 统一转成 skill 内的相对路径。
+
+### 数据库结构由 Alembic 管理
+
+服务启动时只**检查**结构是否就绪，不建表。原先用的
+`Base.metadata.create_all` 语义是"建出还不存在的表"——它对已存在的表
+一个字段都不改，而且不报错。所以模型一改、存量库就会在运行时抛
+`no such column`。
+
+改了 `models.py` 之后要生成迁移：
+
+```bash
+.venv/bin/alembic revision --autogenerate -m "说明"
+```
+
+生成的脚本要**读一遍再提交**，autogenerate 不是万能的（尤其是改列类型、
+重命名这类操作，它可能推断成删除加新增，会丢数据）。
+
+部署时执行：
+
+```bash
+.venv/bin/alembic upgrade head
+```
+
+`tests/test_migrations.py` 是这套机制的保险：它真的跑一遍迁移，再拿结果
+和模型比对。改了模型没生成迁移时它会失败并指出缺哪一列——因为其它测试
+都从模型 `create_all` 建表，根本走不到迁移那条路，不会发现问题。
+
+SQLite 的 `ALTER TABLE` 能力很弱，所以 `env.py` 里开了
+`render_as_batch=True`（建新表、拷数据、换名）。不开的话很多迁移会直接失败。
+切到 PostgreSQL 后这个选项是无害的。
 
 ### 内容 hash
 

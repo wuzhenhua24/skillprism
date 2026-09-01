@@ -34,8 +34,31 @@ def get_session_factory() -> sessionmaker[Session]:
 
 
 def init_db() -> None:
-    """建表。骨架阶段够用；接入正式环境时换成 Alembic 迁移。"""
+    """直接按模型建表。**仅供测试与本地快速起库使用。**
+
+    生产路径是 ``alembic upgrade head``。不要在服务启动时调用它——
+    ``create_all`` 只建缺失的表、从不修改已存在的表，一旦模型新增了表
+    而迁移没跟上，它会把表建出来、掩盖掉本该暴露的迁移缺失。
+    """
     Base.metadata.create_all(get_engine())
+
+
+def schema_is_ready() -> bool:
+    """判断库是否已经迁移过。
+
+    用主表是否存在来判断，而不是查 alembic_version——后者在
+    ``create_all`` 建起来的测试库里并不存在。
+    """
+    from sqlalchemy import inspect
+
+    return inspect(get_engine()).has_table("evaluation_result")
+
+
+SCHEMA_NOT_READY_HINT = (
+    "数据库结构尚未初始化。请先执行迁移：\n"
+    "    alembic upgrade head\n"
+    "（服务不会自动建表——自动建表会掩盖迁移缺失，见 init_db 的说明。）"
+)
 
 
 def reset_engine() -> None:

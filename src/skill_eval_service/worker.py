@@ -15,7 +15,7 @@ from skill_eval_service import queue as task_queue
 from skill_eval_service.adapter import to_dto
 from skill_eval_service.config import Settings, get_settings
 from skill_eval_service.content import SkillContentSource, SkillNotFoundError, build_content_source
-from skill_eval_service.db import init_db, session_scope
+from skill_eval_service.db import SCHEMA_NOT_READY_HINT, schema_is_ready, session_scope
 from skill_eval_service.domain import EvaluationStatus
 from skill_eval_service.materialize import (
     MaterializeError,
@@ -140,7 +140,10 @@ def main() -> int:
         return 1
 
     logger.info("skillevaluator: %s (%s)", report.binary, report.version or "版本未知")
-    init_db()
+
+    if not schema_is_ready():
+        logger.error(SCHEMA_NOT_READY_HINT)
+        return 1
 
     source = build_content_source(settings)
     storage = LocalReportStorage(settings.report_root)

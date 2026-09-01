@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 from skill_eval_service import service
 from skill_eval_service.config import get_settings
 from skill_eval_service.content import SkillContentSource, SkillNotFoundError, build_content_source
-from skill_eval_service.db import get_session_factory, init_db
+from skill_eval_service.db import SCHEMA_NOT_READY_HINT, get_session_factory, schema_is_ready
 from skill_eval_service.embedding_shim import router as embedding_shim_router
 from skill_eval_service.materialize import MaterializeError, UnsafePathError
 from skill_eval_service.models import EvaluationTask
@@ -24,7 +24,8 @@ from skill_eval_service.schemas import EvaluationDTO, SubmitRequest, SubmitRespo
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     get_settings().ensure_dirs()
-    init_db()
+    if not schema_is_ready():
+        raise RuntimeError(SCHEMA_NOT_READY_HINT)
     yield
 
 

@@ -5,37 +5,37 @@ from __future__ import annotations
 import pytest
 from fastapi.testclient import TestClient
 
-from skill_eval_service.api.app import app, get_content_source, get_db
+from skill_eval_service.api.app import app, get_content_source
+from skill_eval_service.config import reset_settings
 from skill_eval_service.content import LocalDirectorySource
-from skill_eval_service.models import Base
+from skill_eval_service.db import init_db, reset_engine
 
 
 @pytest.fixture
-def client(tmp_path):
-    from sqlalchemy import create_engine
-    from sqlalchemy.orm import sessionmaker
+def client(tmp_path, monkeypatch):
+    """把全局配置指向临时库。
 
-    engine = create_engine(f"sqlite:///{tmp_path / 'test.db'}", future=True)
-    Base.metadata.create_all(engine)
-    factory = sessionmaker(bind=engine, expire_on_commit=False)
-
+    不能只覆盖 get_db：应用的 lifespan 会用**全局 engine** 检查库结构，
+    只覆盖依赖的话，那个检查仍然指向默认库——本地有遗留库时测试会侥幸
+    通过，干净检出的 CI 上则失败。
+    """
     skills = tmp_path / "skills"
     (skills / "demo").mkdir(parents=True)
     (skills / "demo" / "SKILL.md").write_text("---\nname: demo\n---\nbody\n")
 
-    def _db():
-        session = factory()
-        try:
-            yield session
-            session.commit()
-        finally:
-            session.close()
+    monkeypatch.setenv("SES_DATABASE_URL", f"sqlite:///{tmp_path / 'test.db'}")
+    monkeypatch.setenv("SES_REPORT_ROOT", str(tmp_path / "reports"))
+    monkeypatch.setenv("SES_WORK_ROOT", str(tmp_path / "work"))
+    reset_settings()
+    reset_engine()
+    init_db()
 
-    app.dependency_overrides[get_db] = _db
     app.dependency_overrides[get_content_source] = lambda: LocalDirectorySource(skills)
     with TestClient(app) as c:
         yield c
     app.dependency_overrides.clear()
+    reset_engine()
+    reset_settings()
 
 
 def test_submit_creates_task(client):

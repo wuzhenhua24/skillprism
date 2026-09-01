@@ -106,6 +106,14 @@ sudo -u skilleval /var/lib/skill-eval/.local/bin/uv venv --python 3.13 .venv
 sudo -u skilleval /var/lib/skill-eval/.local/bin/uv pip install --python .venv/bin/python -e .
 ```
 
+初始化数据库结构。**服务不会自动建表**，这一步不做的话两个进程都会拒绝启动：
+
+```bash
+cd /opt/skill-eval-service
+sudo -u skilleval env SES_DATABASE_URL=sqlite:////var/lib/skill-eval/skill-eval.db \
+  .venv/bin/alembic upgrade head
+```
+
 ## 五、配置
 
 配置走 systemd 的 `EnvironmentFile`，不用项目里的 `.env`——服务由 systemd
@@ -276,8 +284,13 @@ journalctl -u skill-eval-api --since "1 hour ago"
 cd /opt/skill-eval-service
 sudo -u skilleval git pull
 sudo -u skilleval /var/lib/skill-eval/.local/bin/uv pip install --python .venv/bin/python -e .
+sudo -u skilleval env SES_DATABASE_URL=sqlite:////var/lib/skill-eval/skill-eval.db \
+  .venv/bin/alembic upgrade head
 sudo systemctl restart skill-eval-api skill-eval-worker
 ```
+
+`alembic upgrade head` 这一步不能漏。升级前先备份数据库文件——
+迁移可能改表结构，出问题时需要能退回去。
 
 **升级 skillevaluator**——先在非生产环境跑 e2e 测试，尤其确认
 `test_security_scan_completes` 仍然通过；升级后存量 skill 的评分可能整体漂移，
@@ -321,7 +334,6 @@ JSON 31 KB）。按 2000 个 skill、每个每月评测 4 次估算，一年约 
 按优先级：
 
 1. **API 鉴权**——目前完全开放。在此之前只能绑 `127.0.0.1`，靠前置网关鉴权。
-2. **数据库迁移**——目前用 `Base.metadata.create_all`，改表结构需要手工处理，
-   接入正式数据前换 Alembic。
+2. ~~数据库迁移~~——已引入 Alembic。
 3. ~~报告保留策略~~——当前有意不做，见第八节的说明与三个坑。
 4. **监控**——目前只有 journald 日志，没有指标。至少要能看到任务失败率和积压量。
