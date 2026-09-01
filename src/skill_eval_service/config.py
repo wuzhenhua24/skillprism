@@ -19,8 +19,18 @@ class Settings(BaseSettings):
     work_root: Path = Path("./var/work")
 
     #: 开发用的本地 skill 目录（LocalDirectorySource 的根）。
-    #: 接入管理系统后由真实的 content source 取代，届时本项不再使用。
+    #: 接入管理系统后由 ZipArchiveSource 取代。
     local_skills_root: Path = Path("./var/skills")
+
+    # ---- 内容来源：管理系统的 zip 下载接口 ----
+    #: 下载地址模板，{skill_id} 会被 URL 编码后替换。
+    #: 例：https://skills.internal/api/skills/{skill_id}/download
+    content_url_template: str = ""
+    #: 调用管理系统用的令牌，作为 Bearer 发送。
+    content_token: str = ""
+    content_timeout_seconds: float = 60.0
+    #: 下载体积上限。解压前先卡住，避免拉一个超大响应体进内存。
+    max_download_bytes: int = 64 * 1024 * 1024
 
     #: SkillEvaluator CLI 的可执行文件。独立安装，不与本服务共用 venv——
     #: 上游有 litellm<1.89、harbor==0.13.2 等硬 pin，共用早晚会冲突。

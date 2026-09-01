@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 
 from skill_eval_service import service
 from skill_eval_service.config import get_settings
-from skill_eval_service.content import LocalDirectorySource, SkillContentSource, SkillNotFoundError
+from skill_eval_service.content import SkillContentSource, SkillNotFoundError, build_content_source
 from skill_eval_service.db import get_session_factory, init_db
 from skill_eval_service.embedding_shim import router as embedding_shim_router
 from skill_eval_service.materialize import MaterializeError, UnsafePathError
@@ -55,7 +55,7 @@ def get_db() -> Session:
 
 def get_content_source() -> SkillContentSource:
     """内容来源。接入管理系统时替换这个依赖即可，其余代码不动。"""
-    return LocalDirectorySource(get_settings().local_skills_root)
+    return build_content_source(get_settings())
 
 
 @app.get("/healthz")

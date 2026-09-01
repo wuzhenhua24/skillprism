@@ -14,7 +14,7 @@ import time
 from skill_eval_service import queue as task_queue
 from skill_eval_service.adapter import to_dto
 from skill_eval_service.config import Settings, get_settings
-from skill_eval_service.content import LocalDirectorySource, SkillContentSource, SkillNotFoundError
+from skill_eval_service.content import SkillContentSource, SkillNotFoundError, build_content_source
 from skill_eval_service.db import init_db, session_scope
 from skill_eval_service.domain import EvaluationStatus
 from skill_eval_service.materialize import (
@@ -142,7 +142,7 @@ def main() -> int:
     logger.info("skillevaluator: %s (%s)", report.binary, report.version or "版本未知")
     init_db()
 
-    source = LocalDirectorySource(settings.local_skills_root)
+    source = build_content_source(settings)
     storage = LocalReportStorage(settings.report_root)
 
     logger.info("worker 已启动，轮询队列 fast")

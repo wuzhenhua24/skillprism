@@ -173,13 +173,54 @@ schema 检查给物化目录的绝对路径。后者含任务 UUID，原样传�
 skillevaluator validate <skill 目录> --policy ./profiles/internal.yaml -r cli
 ```
 
-## 接入管理系统时要替换的两处
+## 对接管理系统
 
-1. **`content.py`** — 把 `LocalDirectorySource` 换成管理系统的存储客户端。
-   无论哪种实现，返回的 `path` 都视为不可信输入，由 materialize 统一校验。
-2. **`storage.py`** — 把 `LocalReportStorage` 换成对象存储实现。
+管理系统按**一个 skill 一个 zip** 的方式提供内容。配上 URL 模板即可切换，
+留空则退回本地目录（仅开发调试）：
 
-其余代码不需要改动。
+```bash
+SES_CONTENT_URL_TEMPLATE=https://skills.internal/api/skills/{skill_id}/download
+SES_CONTENT_TOKEN=<服务令牌>
+```
+
+`{skill_id}` 会被整体 URL 编码后替换——skill_id 形如 `team/name` 时不会
+改变 URL 的路径结构。令牌作为 `Bearer` 发送。
+
+### 解归档是我们的安全边界
+
+物化层防的是**路径**，不是**归档格式**。以下四类风险由
+[`archive.py`](src/skill_eval_service/archive.py) 处理，它挡不住：
+
+| 风险 | 防线 |
+| --- | --- |
+| Zip slip（条目名含 `..` 或绝对路径） | 每个条目名都过 `safe_relative_path`，绝不用 `extractall` |
+| 解压炸弹 | 声明大小预筛 + **按实际读出字节数**硬截断 + 压缩比上限（声明值会撒谎） |
+| 符号链接条目 | 读 `external_attr` 的文件类型位，拒收非普通文件 |
+| 重复条目名 | 后写覆盖前写可藏内容，直接拒绝 |
+
+任何一条被触发就整体拒绝，不做部分解出——**残缺的 skill 评出来的结果比
+评测失败更有害**，因为它看起来是有效的。
+
+判定文件类型时注意：很多打包工具只写权限位、不写类型位（例如 `0o600`），
+此时不能直接用 `S_ISREG` 判定，否则正常文件会被全部拒收。
+
+### 归档布局
+
+两种都支持，以 `SKILL.md` 的实际位置为准，不靠猜：
+
+```
+SKILL.md              ← 文件在根上
+scripts/run.sh
+
+my-skill/SKILL.md     ← 带一层顶层目录，会被剥掉
+my-skill/scripts/run.sh
+```
+
+`SKILL.md` 埋在两层及以上目录下会被拒绝——那不是能安全推断的布局。
+
+### 还要替换的一处
+
+**`storage.py`** — 把 `LocalReportStorage` 换成对象存储实现。其余代码不需要改动。
 
 ## 测试
 
