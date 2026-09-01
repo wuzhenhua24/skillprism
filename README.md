@@ -62,6 +62,8 @@ worker 另起一个进程：
 .venv/bin/skill-eval-worker
 ```
 
+部署到服务器见 [docs/deployment.md](docs/deployment.md)（Ubuntu，非容器）。
+
 ## 模块
 
 | 模块 | 职责 |
