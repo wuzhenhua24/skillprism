@@ -80,7 +80,7 @@ Keep inputs and outputs distinct.
 
 
 @pytest.fixture
-def env(tmp_path, monkeypatch):
+def env(tmp_path, monkeypatch, db_url):
     """把整个服务指向临时目录，跑完即弃。"""
     skills = tmp_path / "skills"
     (skills / SKILL_ID).mkdir(parents=True)
@@ -88,7 +88,7 @@ def env(tmp_path, monkeypatch):
 
     policy = Path(__file__).resolve().parent.parent / "profiles" / "internal.yaml"
 
-    monkeypatch.setenv("SES_DATABASE_URL", f"sqlite:///{tmp_path / 'e2e.db'}")
+    monkeypatch.setenv("SES_DATABASE_URL", db_url)
     monkeypatch.setenv("SES_REPORT_ROOT", str(tmp_path / "reports"))
     monkeypatch.setenv("SES_WORK_ROOT", str(tmp_path / "work"))
     monkeypatch.setenv("SES_LOCAL_SKILLS_ROOT", str(skills))

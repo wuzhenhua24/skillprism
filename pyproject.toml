@@ -23,6 +23,10 @@ dev = [
 # 契约测试用。基础安装（无 extras）很轻，只有 click/pydantic/pyyaml/rich 等，
 # 不会把 litellm、harbor 拉进来。真正执行评测的 skillevaluator 仍是独立安装
 # 的 CLI，见 README。
+# 跑 PostgreSQL 版测试用。生产部署也需要它。
+pg = [
+    "psycopg[binary]>=3.2",
+]
 contract = [
     "skillevaluator @ git+https://github.com/NVIDIA/SkillEvaluator.git",
 ]

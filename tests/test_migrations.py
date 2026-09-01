@@ -29,13 +29,13 @@ def _alembic_config() -> Config:
     return cfg
 
 
-def test_migrations_produce_the_model_schema(tmp_path, monkeypatch):
+def test_migrations_produce_the_model_schema(db_url, monkeypatch):
     """跑完全部迁移后，库结构必须与模型定义一致。
 
     失败通常意味着改了 models.py 但没生成迁移：
         alembic revision --autogenerate -m "说明"
     """
-    url = f"sqlite:///{tmp_path / 'migrated.db'}"
+    url = db_url
     monkeypatch.setenv("SES_DATABASE_URL", url)
     reset_settings()
 
@@ -57,13 +57,13 @@ def test_migrations_produce_the_model_schema(tmp_path, monkeypatch):
     )
 
 
-def test_downgrade_to_base_is_reachable(tmp_path, monkeypatch):
+def test_downgrade_to_base_is_reachable(db_url, monkeypatch):
     """迁移必须可回滚到空库。
 
     不可回滚的迁移在出问题时没有退路，而 autogenerate 生成的 downgrade
     偶尔需要手工补全，这里保证它至少是可执行的。
     """
-    url = f"sqlite:///{tmp_path / 'roundtrip.db'}"
+    url = db_url
     monkeypatch.setenv("SES_DATABASE_URL", url)
     reset_settings()
 

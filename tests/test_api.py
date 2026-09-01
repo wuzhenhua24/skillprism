@@ -12,7 +12,7 @@ from skill_eval_service.db import init_db, reset_engine
 
 
 @pytest.fixture
-def client(tmp_path, monkeypatch):
+def client(tmp_path, monkeypatch, db_url):
     """把全局配置指向临时库。
 
     不能只覆盖 get_db：应用的 lifespan 会用**全局 engine** 检查库结构，
@@ -23,7 +23,7 @@ def client(tmp_path, monkeypatch):
     (skills / "demo").mkdir(parents=True)
     (skills / "demo" / "SKILL.md").write_text("---\nname: demo\n---\nbody\n")
 
-    monkeypatch.setenv("SES_DATABASE_URL", f"sqlite:///{tmp_path / 'test.db'}")
+    monkeypatch.setenv("SES_DATABASE_URL", db_url)
     monkeypatch.setenv("SES_REPORT_ROOT", str(tmp_path / "reports"))
     monkeypatch.setenv("SES_WORK_ROOT", str(tmp_path / "work"))
     reset_settings()

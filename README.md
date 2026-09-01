@@ -264,6 +264,19 @@ my-skill/scripts/run.sh
 .venv/bin/python -m pytest
 ```
 
+数据库地址由 `tests/conftest.py` 的 `db_url` 夹具统一提供，默认 SQLite。
+设置 `SES_TEST_DATABASE_URL` 可让整套测试跑在 PostgreSQL 上：
+
+```bash
+SES_TEST_DATABASE_URL='postgresql+psycopg://user:pass@host:5432/postgres' \
+  .venv/bin/python -m pytest -q
+```
+
+**这一步在发版前必须做。** 生产用 PG、开发用 SQLite，两者行为不同——最要紧
+的是 `queue.claim_next`：它在 PG 上走 `SKIP LOCKED`、在 SQLite 上不加锁，
+也就是说**生产真正执行的那条分支，本地开发一次都跑不到**。
+`tests/test_queue_concurrency.py` 里有两条用例专门验证它，只在 PG 上生效。
+
 端到端集成测试标记为 `e2e`，需要 `skillevaluator` 在 PATH 上、三个扫描器齐备，
 缺失时自动跳过，因此裸环境下不会让 CI 变红。要显式排除：
 

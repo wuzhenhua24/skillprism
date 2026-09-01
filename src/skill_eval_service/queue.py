@@ -51,27 +51,25 @@ def enqueue(
 def claim_next(session: Session, queue: str = "fast") -> EvaluationTask | None:
     """取一个待处理任务并置为 running。
 
-    骨架用行锁 + 状态判断；多 worker 部署时 SQLite 会串行化，
-    换 PostgreSQL 后可改成 SELECT ... FOR UPDATE SKIP LOCKED。
+    按方言决定是否加锁，而不是靠捕获异常来判断：SQLite 不支持
+    ``SKIP LOCKED``，其余数据库都支持。
+
+    这里刻意不用 try/except 兜底。捕获所有异常会让**任何**一次查询失败都
+    悄悄退化成不加锁的查询——在 PostgreSQL 上那意味着两个 worker 可能抢到
+    同一个任务，而且没有任何迹象。宁可让异常抛出去。
+
+    SQLite 下没有锁，因此**只能跑单个 worker 实例**，这是部署上的硬约束。
     """
     stmt = (
         select(EvaluationTask)
         .where(EvaluationTask.state == str(TaskState.QUEUED), EvaluationTask.queue == queue)
         .order_by(EvaluationTask.created_at)
         .limit(1)
-        .with_for_update(skip_locked=True)
     )
-    try:
-        task = session.execute(stmt).scalar_one_or_none()
-    except Exception:
-        # SQLite 不支持 SKIP LOCKED，退回不加锁的查询。
-        task = session.execute(
-            select(EvaluationTask)
-            .where(EvaluationTask.state == str(TaskState.QUEUED), EvaluationTask.queue == queue)
-            .order_by(EvaluationTask.created_at)
-            .limit(1)
-        ).scalar_one_or_none()
+    if session.get_bind().dialect.name != "sqlite":
+        stmt = stmt.with_for_update(skip_locked=True)
 
+    task = session.execute(stmt).scalar_one_or_none()
     if task is None:
         return None
 
