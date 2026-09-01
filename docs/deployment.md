@@ -20,7 +20,7 @@ skill-eval-worker   轮询任务表，调用 skillevaluator CLI 跑评测
 
 | 约束 | 原因 | 何时要改 |
 | --- | --- | --- |
-| **只能跑一个 worker 实例** | SQLite 不支持 `SELECT ... FOR UPDATE SKIP LOCKED`，多实例会抢同一个任务 | 换 PostgreSQL 后可多开 |
+| **只能跑一个 worker 实例** | SQLite 不支持 `SELECT ... FOR UPDATE SKIP LOCKED`，多实例会抢同一个任务 | 换 PostgreSQL 后可多开，判据见第九节 |
 | **API 与 worker 必须同机** | 报告存本地文件系统，API 靠读同一个目录返回报告 | 换对象存储后可分离 |
 | **API 无鉴权** | 尚未实现 | 上线前必须补，见文末 |
 
@@ -317,7 +317,61 @@ JSON 31 KB）。按 2000 个 skill、每个每月评测 4 次估算，一年约 
 
 `work/` 由 worker 自己清理，正常情况下应当是空的；持续有残留说明 worker 异常退出过。
 
-## 九、故障排查
+## 九、什么时候切换 PostgreSQL
+
+长远看一定要切，但**别等"跑不动了"——那一天不会来**。
+
+先排除掉不是理由的：写入量方面，我们每次评测只写几行，即使一万个 skill 每天
+全评一遍也只有约 0.2 次写/秒，而 SQLite 在 WAL 模式下每秒几千次写没问题，
+差四个数量级。数据量方面，结果行很小，十万行的库也就几十 MB，查询仍是毫秒级。
+
+**真正的触发条件是部署形态，不是性能：**
+
+| 触发条件 | 为什么必须切 |
+| --- | --- |
+| 要跑第二个 worker | SQLite 不支持 `SELECT ... FOR UPDATE SKIP LOCKED`，两个 worker 会抢同一个任务、重复评测 |
+| API 与 worker 分机部署 | SQLite 是文件，两进程需共享文件系统；跨机走 NFS 锁语义不可靠，会损坏库 |
+| Tier 3 上线 | 必然同时触发上面两条——任务是分钟到小时级，串行不可行，且需要专门的沙箱节点 |
+| 流程要求 | 公司要求数据库纳入统一备份/监控/审计体系时，SQLite 不在那套体系里 |
+
+最后一条**可能比技术需求先到**。Tier 2 是中间情况：catalog 重建是分钟级，
+单 worker 也能跑；但若夜间重建窗口拉得太长想并发，就触发第一条。
+
+### 选 PostgreSQL 还是 MySQL
+
+**跟公司现有的 DBA 体系走**，不要为技术偏好单开一套。两者都支持 `SKIP LOCKED`
+（MySQL 8.0+）、都有 JSON 类型、SQLAlchemy 都支持。
+
+若两条路都通，选 PostgreSQL——JSONB 可建索引，将来要按 findings 内容查询会有
+优势。但这个优势不足以对抗"运维体系里只有 MySQL"。
+
+### 代码基本不用改
+
+- 列类型全是可移植的（`String` / `Integer` / `Float` / `Boolean` / `DateTime` / `Text` / `JSON`），迁移脚本在 PG 上可直接重跑
+- [`queue.py`](../src/skill_eval_service/queue.py) 的 `claim_next` **已经先尝试 `SKIP LOCKED`**、失败才退回不加锁的查询。切到 PG 后自动走正确分支，无需改代码
+- 代码里没有 SQLite 特有的函数或类型
+
+改一个 `SES_DATABASE_URL` 就能连上去。
+
+### 但切换是两步，Alembic 只解决第一步
+
+1. **建结构**——在新库上跑 `alembic upgrade head`，表就有了
+2. **搬数据**——Alembic 不管这个，需要一次性脚本
+
+搬数据有三个坑：
+
+- **用 SQLAlchemy ORM 读写，不要用 SQL dump。** dump 会把 SQLite 的类型表示
+  原样带过去——布尔存成 0/1、时间戳存成字符串。走 ORM 则由 SQLAlchemy 负责
+  两端的类型转换。
+- **自增序列要重置。** `evaluation_detail.id` 是自增主键，在 PG 上对应一个序列。
+  带显式 id 批量插入后序列仍停在 1，下一次插入会主键冲突。导完必须
+  `setval` 到当前最大值。
+- **`sa.JSON` 在 PG 上映射为 `JSON` 而非 `JSONB`。** 若要利用 JSONB 的索引能力，
+  那是切换之后另一个迁移的事，不要混在同一步里做。
+
+计划切换时要为搬数据留出工夫，别以为改个 URL 就完事。
+
+## 十、故障排查
 
 | 现象 | 原因 | 处理 |
 | --- | --- | --- |
@@ -329,7 +383,7 @@ JSON 31 KB）。按 2000 个 skill、每个每月评测 4 次估算，一年约 
 | 报告接口 404 但评测显示成功 | API 与 worker 不在同一文件系统 | 当前形态要求两者同机 |
 | 下载内容失败 | 区分两类：`SkillNotFoundError`（404 或归档解不出，不重试）与 `ContentFetchError`（5xx/网络，会重试） | 看 worker 日志里的具体异常 |
 
-## 十、上生产前必须补的
+## 十一、上生产前必须补的
 
 按优先级：
 
