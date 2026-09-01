@@ -1,0 +1,25 @@
+# 公司内部校验策略。
+#
+# 通过 `skillevaluator validate --policy <本文件>` 生效，overlay 在内置的
+# external profile 之上：severity_overrides 逐键合并（本文件优先），
+# author_email_regex 仅在此处显式出现该键时才覆盖基础值。
+#
+# 注意：--profile 只能选择 skillevaluator 包内自带的 profile，
+# 无法指向外部文件，因此自定义策略必须走 --policy。
+
+profile: internal
+
+identity:
+  # TODO: 替换为公司邮箱域名。设为 null 则不限制作者邮箱域。
+  author_email_regex: '^[A-Za-z0-9._%+-]+@example\.com$'
+
+# 以下是起点而非定论。当前定位是“只展示不拦截”，所以可以先按这套跑，
+# 用真实 skill 库的数据判断哪些检查噪声大、哪些需要提级。调整方法见 README。
+severity_overrides:
+  # 作者信息需要能追溯到人，但不到 critical。
+  SCHEMA.author_missing: high
+  SCHEMA.author_format: high
+  WORKFLOWS.author_format: high
+
+  # 许可证问题保持阻断级别。
+  LICENSE.*: critical
