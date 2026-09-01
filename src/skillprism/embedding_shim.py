@@ -27,7 +27,7 @@ import httpx
 from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel, ConfigDict
 
-from skill_eval_service.config import Settings, get_settings
+from skillprism.config import Settings, get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -209,7 +209,7 @@ async def embeddings(
         api_key = authorization[7:].strip()
     api_key = api_key or settings.ark_api_key
     if not api_key:
-        raise HTTPException(status_code=401, detail="缺少 API key：请带 Authorization 头或配置 SES_ARK_API_KEY")
+        raise HTTPException(status_code=401, detail="缺少 API key：请带 Authorization 头或配置 SKILLPRISM_ARK_API_KEY")
 
     async with httpx.AsyncClient(timeout=settings.shim_timeout_seconds) as client:
         try:

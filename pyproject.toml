@@ -1,7 +1,7 @@
 [project]
-name = "skill-eval-service"
+name = "skillprism"
 version = "0.1.0"
-description = "Skill 评测服务 — 基于 SkillEvaluator 的 Tier 1 评测编排与结果服务"
+description = "SkillPrism — 基于 SkillEvaluator 的 skill 评测编排与结果服务"
 requires-python = ">=3.12,<3.14"
 dependencies = [
     "fastapi>=0.115",
@@ -32,7 +32,7 @@ contract = [
 ]
 
 [project.scripts]
-skill-eval-worker = "skill_eval_service.worker:main"
+skillprism-worker = "skillprism.worker:main"
 
 [build-system]
 requires = ["setuptools>=68"]

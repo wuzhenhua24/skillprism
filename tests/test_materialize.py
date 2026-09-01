@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import pytest
 
-from skill_eval_service.materialize import (
+from skillprism.materialize import (
     MaterializeError,
     SkillFile,
     UnsafePathError,

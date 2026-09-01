@@ -1,4 +1,4 @@
-# 部署（Ubuntu）
+# SkillPrism 部署（Ubuntu）
 
 非容器部署：两个 systemd 服务跑在同一台机器上，共用一份代码和一个 SQLite 库。
 适用于当前阶段——服务定位是"只展示不拦截"，可用性要求低，量级也小。
@@ -8,13 +8,13 @@
 ## 部署形态
 
 ```
-skill-eval-api      uvicorn，对管理系统提供 HTTP 接口
-skill-eval-worker   轮询任务表，调用 skillevaluator CLI 跑评测
+skillprism-api      uvicorn，对管理系统提供 HTTP 接口
+skillprism-worker   轮询任务表，调用 skillevaluator CLI 跑评测
         ↓ 共用
-/var/lib/skill-eval/   SQLite 库、报告、物化临时目录
+/var/lib/skillprism/   SQLite 库、报告、物化临时目录
 ```
 
-两个进程必须能读写同一个 `/var/lib/skill-eval`——API 要回读 worker 写的报告。
+两个进程必须能读写同一个 `/var/lib/skillprism`——API 要回读 worker 写的报告。
 
 ### 现阶段的硬约束
 
@@ -41,8 +41,8 @@ sudo apt update && sudo apt install -y curl ca-certificates
 
 ```bash
 sudo apt install -y postgresql
-sudo -u postgres createuser skilleval --pwprompt
-sudo -u postgres createdb skilleval --owner skilleval
+sudo -u postgres createuser skillprism --pwprompt
+sudo -u postgres createdb skillprism --owner skillprism
 ```
 
 Ubuntu 源里的版本：24.04 是 PG 16，22.04 是 PG 14。若有特定版本要求，走 PGDG
@@ -51,9 +51,9 @@ Ubuntu 源里的版本：24.04 是 PG 16，22.04 是 PG 14。若有特定版本�
 建一个专用账号和目录：
 
 ```bash
-sudo useradd --system --home-dir /var/lib/skill-eval --create-home --shell /usr/sbin/nologin skilleval
-sudo mkdir -p /opt/skill-eval-service /etc/skill-eval
-sudo chown -R skilleval:skilleval /var/lib/skill-eval
+sudo useradd --system --home-dir /var/lib/skillprism --create-home --shell /usr/sbin/nologin skillprism
+sudo mkdir -p /opt/skillprism /etc/skillprism
+sudo chown -R skillprism:skillprism /var/lib/skillprism
 ```
 
 ## 二、安装 uv
@@ -62,25 +62,25 @@ sudo chown -R skilleval:skilleval /var/lib/skill-eval
 而 Ubuntu 22.04 自带的是 3.10。uv 会自己管理 Python，省掉 deadsnakes 之类的源。
 
 ```bash
-sudo -u skilleval sh -c 'curl -LsSf https://astral.sh/uv/install.sh | sh'
+sudo -u skillprism sh -c 'curl -LsSf https://astral.sh/uv/install.sh | sh'
 ```
 
-装到 `/var/lib/skill-eval/.local/bin/uv`。下文统一用绝对路径，避免 PATH 问题。
+装到 `/var/lib/skillprism/.local/bin/uv`。下文统一用绝对路径，避免 PATH 问题。
 
 ## 三、安装评测工具链
 
-以 `skilleval` 身份安装，四个工具都会落在
-`/var/lib/skill-eval/.local/bin/` 下。
+以 `skillprism` 身份安装，四个工具都会落在
+`/var/lib/skillprism/.local/bin/` 下。
 
 ```bash
-UV=/var/lib/skill-eval/.local/bin/uv
+UV=/var/lib/skillprism/.local/bin/uv
 
-sudo -u skilleval $UV tool install --python 3.13 \
+sudo -u skillprism $UV tool install --python 3.13 \
   "skillevaluator[security] @ git+https://github.com/NVIDIA/SkillEvaluator.git"
 
-sudo -u skilleval $UV tool install semgrep
+sudo -u skillprism $UV tool install semgrep
 
-sudo -u skilleval $UV tool install \
+sudo -u skillprism $UV tool install \
   "skillspector @ git+https://github.com/NVIDIA/SkillSpector.git@v2.9.6"
 ```
 
@@ -103,19 +103,19 @@ rm /tmp/gitleaks.tar.gz
 验证四个都在：
 
 ```bash
-sudo -u skilleval env PATH=/var/lib/skill-eval/.local/bin:/usr/local/bin:/usr/bin:/bin \
+sudo -u skillprism env PATH=/var/lib/skillprism/.local/bin:/usr/local/bin:/usr/bin:/bin \
   sh -c 'skillevaluator --version && semgrep --version && gitleaks version && skillspector --version'
 ```
 
 ## 四、部署服务代码
 
 ```bash
-sudo git clone <仓库地址> /opt/skill-eval-service
-sudo chown -R skilleval:skilleval /opt/skill-eval-service
+sudo git clone <仓库地址> /opt/skillprism
+sudo chown -R skillprism:skillprism /opt/skillprism
 
-cd /opt/skill-eval-service
-sudo -u skilleval /var/lib/skill-eval/.local/bin/uv venv --python 3.13 .venv
-sudo -u skilleval /var/lib/skill-eval/.local/bin/uv pip install --python .venv/bin/python -e ".[pg]"
+cd /opt/skillprism
+sudo -u skillprism /var/lib/skillprism/.local/bin/uv venv --python 3.13 .venv
+sudo -u skillprism /var/lib/skillprism/.local/bin/uv pip install --python .venv/bin/python -e ".[pg]"
 ```
 
 ## 五、配置
@@ -124,29 +124,29 @@ sudo -u skilleval /var/lib/skill-eval/.local/bin/uv pip install --python .venv/b
 启动，环境变量直接注入即可。
 
 ```bash
-sudo tee /etc/skill-eval/service.env > /dev/null <<'EOF'
-SES_DATABASE_URL=postgresql+psycopg://skilleval:<密码>@127.0.0.1:5432/skilleval
-SES_REPORT_ROOT=/var/lib/skill-eval/reports
-SES_WORK_ROOT=/var/lib/skill-eval/work
-SES_POLICY_FILE=/opt/skill-eval-service/profiles/internal.yaml
-SES_SKILLEVALUATOR_BIN=/var/lib/skill-eval/.local/bin/skillevaluator
-SES_EVAL_TIMEOUT_SECONDS=600
-SES_REQUIRE_SCANNERS=true
-SES_POLL_INTERVAL_SECONDS=2
-SES_MAX_ATTEMPTS=3
+sudo tee /etc/skillprism/service.env > /dev/null <<'EOF'
+SKILLPRISM_DATABASE_URL=postgresql+psycopg://skillprism:<密码>@127.0.0.1:5432/skillprism
+SKILLPRISM_REPORT_ROOT=/var/lib/skillprism/reports
+SKILLPRISM_WORK_ROOT=/var/lib/skillprism/work
+SKILLPRISM_POLICY_FILE=/opt/skillprism/profiles/internal.yaml
+SKILLPRISM_SKILLEVALUATOR_BIN=/var/lib/skillprism/.local/bin/skillevaluator
+SKILLPRISM_EVAL_TIMEOUT_SECONDS=600
+SKILLPRISM_REQUIRE_SCANNERS=true
+SKILLPRISM_POLL_INTERVAL_SECONDS=2
+SKILLPRISM_MAX_ATTEMPTS=3
 
 # 内容来源：管理系统的 zip 下载接口（待对方提供后填写）
-SES_CONTENT_URL_TEMPLATE=
-SES_CONTENT_TOKEN=
-SES_CONTENT_TIMEOUT_SECONDS=60
-SES_MAX_DOWNLOAD_BYTES=67108864
+SKILLPRISM_CONTENT_URL_TEMPLATE=
+SKILLPRISM_CONTENT_TOKEN=
+SKILLPRISM_CONTENT_TIMEOUT_SECONDS=60
+SKILLPRISM_MAX_DOWNLOAD_BYTES=67108864
 EOF
 
-sudo chown root:skilleval /etc/skill-eval/service.env
-sudo chmod 640 /etc/skill-eval/service.env
+sudo chown root:skillprism /etc/skillprism/service.env
+sudo chmod 640 /etc/skillprism/service.env
 ```
 
-`SES_CONTENT_TOKEN` 是凭据，所以这个文件是 `0640 root:skilleval`——
+`SKILLPRISM_CONTENT_TOKEN` 是凭据，所以这个文件是 `0640 root:skillprism`——
 服务读得到，其他账号读不到。
 
 连接串里有数据库密码，这也是这个文件必须是 `0640` 的原因之一。
@@ -158,8 +158,8 @@ sudo chmod 640 /etc/skill-eval/service.env
 两个进程都会拒绝启动：
 
 ```bash
-cd /opt/skill-eval-service
-sudo -u skilleval env $(grep SES_DATABASE_URL /etc/skill-eval/service.env) \
+cd /opt/skillprism
+sudo -u skillprism env $(grep SKILLPRISM_DATABASE_URL /etc/skillprism/service.env) \
   .venv/bin/alembic upgrade head
 ```
 
@@ -168,20 +168,20 @@ sudo -u skilleval env $(grep SES_DATABASE_URL /etc/skill-eval/service.env) \
 两个 unit 共用同一份环境配置。
 
 ```bash
-sudo tee /etc/systemd/system/skill-eval-api.service > /dev/null <<'EOF'
+sudo tee /etc/systemd/system/skillprism-api.service > /dev/null <<'EOF'
 [Unit]
-Description=Skill 评测服务 API
+Description=SkillPrism API
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=exec
-User=skilleval
-Group=skilleval
-WorkingDirectory=/opt/skill-eval-service
-EnvironmentFile=/etc/skill-eval/service.env
-Environment=PATH=/var/lib/skill-eval/.local/bin:/usr/local/bin:/usr/bin:/bin
-ExecStart=/opt/skill-eval-service/.venv/bin/uvicorn skill_eval_service.api.app:app --host 127.0.0.1 --port 8000
+User=skillprism
+Group=skillprism
+WorkingDirectory=/opt/skillprism
+EnvironmentFile=/etc/skillprism/service.env
+Environment=PATH=/var/lib/skillprism/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/opt/skillprism/.venv/bin/uvicorn skillprism.api.app:app --host 127.0.0.1 --port 8000
 Restart=on-failure
 RestartSec=5
 
@@ -190,7 +190,7 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/var/lib/skill-eval
+ReadWritePaths=/var/lib/skillprism
 PrivateDevices=true
 RestrictSUIDSGID=true
 
@@ -198,20 +198,20 @@ RestrictSUIDSGID=true
 WantedBy=multi-user.target
 EOF
 
-sudo tee /etc/systemd/system/skill-eval-worker.service > /dev/null <<'EOF'
+sudo tee /etc/systemd/system/skillprism-worker.service > /dev/null <<'EOF'
 [Unit]
-Description=Skill 评测服务 Worker
-After=network-online.target skill-eval-api.service
+Description=SkillPrism Worker
+After=network-online.target skillprism-api.service
 Wants=network-online.target
 
 [Service]
 Type=exec
-User=skilleval
-Group=skilleval
-WorkingDirectory=/opt/skill-eval-service
-EnvironmentFile=/etc/skill-eval/service.env
-Environment=PATH=/var/lib/skill-eval/.local/bin:/usr/local/bin:/usr/bin:/bin
-ExecStart=/opt/skill-eval-service/.venv/bin/skill-eval-worker
+User=skillprism
+Group=skillprism
+WorkingDirectory=/opt/skillprism
+EnvironmentFile=/etc/skillprism/service.env
+Environment=PATH=/var/lib/skillprism/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/opt/skillprism/.venv/bin/skillprism-worker
 Restart=on-failure
 RestartSec=10
 
@@ -219,7 +219,7 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/var/lib/skill-eval
+ReadWritePaths=/var/lib/skillprism
 PrivateDevices=true
 RestrictSUIDSGID=true
 
@@ -228,18 +228,18 @@ WantedBy=multi-user.target
 EOF
 
 sudo systemctl daemon-reload
-sudo systemctl enable --now skill-eval-api skill-eval-worker
+sudo systemctl enable --now skillprism-api skillprism-worker
 ```
 
 `PATH` 必须显式给：worker 用它找 skillevaluator，skillevaluator 用它找三个扫描器。
-systemd 默认的 PATH 不含 `/var/lib/skill-eval/.local/bin`。
+systemd 默认的 PATH 不含 `/var/lib/skillprism/.local/bin`。
 
 **worker 只能起一个实例**，别做多副本，原因见开头的约束表。
 
 ## 七、验证
 
 ```bash
-systemctl status skill-eval-api skill-eval-worker
+systemctl status skillprism-api skillprism-worker
 curl -s http://127.0.0.1:8000/healthz | python3 -m json.tool
 ```
 
@@ -248,21 +248,21 @@ curl -s http://127.0.0.1:8000/healthz | python3 -m json.tool
 ```json
 {
   "status": "ok",
-  "skillevaluator": "/var/lib/skill-eval/.local/bin/skillevaluator",
+  "skillevaluator": "/var/lib/skillprism/.local/bin/skillevaluator",
   "version": "skillevaluator, version 0.2.1",
   "missing_scanners": []
 }
 ```
 
 `missing_scanners` 非空就说明扫描器没装全，此时评测结果的安全部分是空的。
-worker 在 `SES_REQUIRE_SCANNERS=true` 下会**直接拒绝启动**——这是有意为之，
+worker 在 `SKILLPRISM_REQUIRE_SCANNERS=true` 下会**直接拒绝启动**——这是有意为之，
 带病运行会产出看起来合格、实际没扫过的结果。
 
 跑一次真实评测（内容来源接上之前，可以先用本地目录验证链路）：
 
 ```bash
-sudo -u skilleval mkdir -p /var/lib/skill-eval/skills/demo
-sudo -u skilleval tee /var/lib/skill-eval/skills/demo/SKILL.md > /dev/null <<'EOF'
+sudo -u skillprism mkdir -p /var/lib/skillprism/skills/demo
+sudo -u skillprism tee /var/lib/skillprism/skills/demo/SKILL.md > /dev/null <<'EOF'
 ---
 name: demo
 description: A deployment smoke test skill. Use when verifying the evaluation pipeline after deployment.
@@ -286,19 +286,19 @@ curl -s http://127.0.0.1:8000/api/skills/demo/evaluation | python3 -m json.tool
 **看日志**
 
 ```bash
-journalctl -u skill-eval-worker -f
-journalctl -u skill-eval-api --since "1 hour ago"
+journalctl -u skillprism-worker -f
+journalctl -u skillprism-api --since "1 hour ago"
 ```
 
 **升级服务代码**
 
 ```bash
-cd /opt/skill-eval-service
-sudo -u skilleval git pull
-sudo -u skilleval /var/lib/skill-eval/.local/bin/uv pip install --python .venv/bin/python -e .
-sudo -u skilleval env $(grep SES_DATABASE_URL /etc/skill-eval/service.env) \
+cd /opt/skillprism
+sudo -u skillprism git pull
+sudo -u skillprism /var/lib/skillprism/.local/bin/uv pip install --python .venv/bin/python -e .
+sudo -u skillprism env $(grep SKILLPRISM_DATABASE_URL /etc/skillprism/service.env) \
   .venv/bin/alembic upgrade head
-sudo systemctl restart skill-eval-api skill-eval-worker
+sudo systemctl restart skillprism-api skillprism-worker
 ```
 
 `alembic upgrade head` 这一步不能漏。升级前先备份数据库文件——
@@ -308,7 +308,7 @@ sudo systemctl restart skill-eval-api skill-eval-worker
 `test_security_scan_completes` 仍然通过；升级后存量 skill 的评分可能整体漂移，
 建议先跑一批做对比。
 
-**备份**：PostgreSQL 库 `skilleval` 是全部结果数据，用 `pg_dump` 备份。
+**备份**：PostgreSQL 库 `skillprism` 是全部结果数据，用 `pg_dump` 备份。
 `reports/` 可按 `content_hash` 重新生成，丢了不致命。
 
 **报告清理：当前有意不做。** 实测单次评测产出约 271 KB（HTML 240 KB +
@@ -355,16 +355,16 @@ JSON 31 KB）。按 2000 个 skill、每个每月评测 4 次估算，一年约 
 ### 所以发版前必须用 PG 跑一遍测试
 
 测试的数据库地址由 `tests/conftest.py` 的 `db_url` 夹具统一提供，默认 SQLite，
-设置 `SES_TEST_DATABASE_URL` 后改用 PostgreSQL。指向的库只用于建/删临时测试库，
+设置 `SKILLPRISM_TEST_DATABASE_URL` 后改用 PostgreSQL。指向的库只用于建/删临时测试库，
 本身不会被改动；每个测试用一个随机命名的临时库，跑完即删，因此多人并跑
 不会互相污染。
 
 在测试机上执行：
 
 ```bash
-cd /opt/skill-eval-service
-sudo -u skilleval env \
-  SES_TEST_DATABASE_URL='postgresql+psycopg://skilleval:<密码>@127.0.0.1:5432/postgres' \
+cd /opt/skillprism
+sudo -u skillprism env \
+  SKILLPRISM_TEST_DATABASE_URL='postgresql+psycopg://skillprism:<密码>@127.0.0.1:5432/postgres' \
   .venv/bin/python -m pytest -q
 ```
 
@@ -373,7 +373,7 @@ sudo -u skilleval env \
 原因，不会伪装成通过。
 
 同一文件里的 `test_configured_backend_actually_engages` 是另一道防线——
-设了 `SES_TEST_DATABASE_URL` 却仍跑在 SQLite 上时它会失败，避免出现
+设了 `SKILLPRISM_TEST_DATABASE_URL` 却仍跑在 SQLite 上时它会失败，避免出现
 "以为验证过了、其实一直在跑 SQLite"这种最坏的情况。连不上 PG 时测试会
 直接 ERROR，也不会静默跳过。
 
@@ -391,9 +391,9 @@ worker 写的报告，所以两者必须同机。要真正横向扩展需要先�
 | `status` 一直是 `incomplete`，`incomplete_scans` 含 `skillspector` | 装了 2.10.0 及以上版本 | 降回 v2.9.6 |
 | 所有 skill 都报 `SCHEMA.author_missing` | `internal.yaml` 的邮箱域名还是 `example.com` | 改成公司域名 |
 | 每个 skill 都多出 `name_consistency` / `folder_hierarchy` | 物化布局异常 | 应当不会发生，若出现说明 `skill_id` 末段与 frontmatter 的 `name` 系统性不一致，需要判断是真问题还是命名规则差异 |
-| 任务卡在 `queued` | worker 没运行 | `systemctl status skill-eval-worker` |
+| 任务卡在 `queued` | worker 没运行 | `systemctl status skillprism-worker` |
 | 启动报"数据库结构尚未初始化" | 没跑迁移 | `alembic upgrade head`，见第五节 |
-| 连不上数据库 | 连接串、密码或 PG 服务 | `sudo -u skilleval psql "$SES_DATABASE_URL" -c 'select 1'` |
+| 连不上数据库 | 连接串、密码或 PG 服务 | `sudo -u skillprism psql "$SKILLPRISM_DATABASE_URL" -c 'select 1'` |
 | 报告接口 404 但评测显示成功 | API 与 worker 不在同一文件系统 | 当前形态要求两者同机 |
 | 下载内容失败 | 区分两类：`SkillNotFoundError`（404 或归档解不出，不重试）与 `ContentFetchError`（5xx/网络，会重试） | 看 worker 日志里的具体异常 |
 

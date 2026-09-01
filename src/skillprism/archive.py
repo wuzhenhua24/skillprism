@@ -22,7 +22,7 @@ import io
 import stat
 import zipfile
 
-from skill_eval_service.materialize import (
+from skillprism.materialize import (
     MAX_FILE_BYTES,
     MAX_FILES,
     MAX_TOTAL_BYTES,

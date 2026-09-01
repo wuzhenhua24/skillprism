@@ -11,23 +11,23 @@ import logging
 import sys
 import time
 
-from skill_eval_service import queue as task_queue
-from skill_eval_service.adapter import to_dto
-from skill_eval_service.config import Settings, get_settings
-from skill_eval_service.content import SkillContentSource, SkillNotFoundError, build_content_source
-from skill_eval_service.db import SCHEMA_NOT_READY_HINT, schema_is_ready, session_scope
-from skill_eval_service.domain import EvaluationStatus
-from skill_eval_service.materialize import (
+from skillprism import queue as task_queue
+from skillprism.adapter import to_dto
+from skillprism.config import Settings, get_settings
+from skillprism.content import SkillContentSource, SkillNotFoundError, build_content_source
+from skillprism.db import SCHEMA_NOT_READY_HINT, schema_is_ready, session_scope
+from skillprism.domain import EvaluationStatus
+from skillprism.materialize import (
     MaterializeError,
     UnsafePathError,
     cleanup,
     compute_content_hash,
     materialize,
 )
-from skill_eval_service.models import EvaluationTask
-from skill_eval_service.repository import save_result
-from skill_eval_service.runner import PreflightError, require_ready, run_validate
-from skill_eval_service.storage import LocalReportStorage, ReportStorage
+from skillprism.models import EvaluationTask
+from skillprism.repository import save_result
+from skillprism.runner import PreflightError, require_ready, run_validate
+from skillprism.storage import LocalReportStorage, ReportStorage
 
 logger = logging.getLogger(__name__)
 

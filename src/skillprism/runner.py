@@ -20,8 +20,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from skill_eval_service.config import Settings
-from skill_eval_service.domain import (
+from skillprism.config import Settings
+from skillprism.domain import (
     EXIT_CONFIG_ERROR,
     EXIT_RUNTIME_ERROR,
     REQUIRED_SCANNERS,
@@ -107,7 +107,7 @@ def require_ready(settings: Settings) -> PreflightReport:
         raise PreflightError(
             f"缺少外部扫描器：{', '.join(report.missing_scanners)}。"
             "缺失会让 Tier 1 产出 incomplete 结果。"
-            "装齐后再启动，或在明确接受不完整结论时设 SES_REQUIRE_SCANNERS=false。"
+            "装齐后再启动，或在明确接受不完整结论时设 SKILLPRISM_REQUIRE_SCANNERS=false。"
         )
     return report
 

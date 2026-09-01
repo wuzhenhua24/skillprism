@@ -1,4 +1,4 @@
-"""服务配置。所有可调项集中在这里，通过 SES_ 前缀的环境变量覆盖。"""
+"""服务配置。所有可调项集中在这里，通过 SKILLPRISM_ 前缀的环境变量覆盖。"""
 
 from __future__ import annotations
 
@@ -8,9 +8,9 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="SES_", env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(env_prefix="SKILLPRISM_", env_file=".env", extra="ignore")
 
-    database_url: str = "sqlite:///./var/skill-eval.db"
+    database_url: str = "sqlite:///./var/skillprism.db"
 
     #: 报告原文落地位置。生产环境换成对象存储实现，见 storage.py。
     report_root: Path = Path("./var/reports")

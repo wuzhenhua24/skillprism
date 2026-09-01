@@ -15,8 +15,8 @@ from datetime import UTC, datetime
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from skill_eval_service.domain import TaskState, Tier
-from skill_eval_service.models import EvaluationTask
+from skillprism.domain import TaskState, Tier
+from skillprism.models import EvaluationTask
 
 #: tier 到队列的路由。Tier 2/3 尚未实现，先占位以免将来改表。
 QUEUE_BY_TIER = {

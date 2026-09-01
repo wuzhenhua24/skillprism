@@ -11,8 +11,8 @@ import zipfile
 
 import pytest
 
-from skill_eval_service.archive import ArchiveError, read_skill_zip
-from skill_eval_service.materialize import MAX_FILE_BYTES, MAX_FILES
+from skillprism.archive import ArchiveError, read_skill_zip
+from skillprism.materialize import MAX_FILE_BYTES, MAX_FILES
 
 MANIFEST = b"---\nname: demo\ndescription: A demo skill.\n---\n\n# Demo\n"
 

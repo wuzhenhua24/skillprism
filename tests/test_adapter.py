@@ -8,9 +8,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from skill_eval_service.adapter import determine_status, to_dto
-from skill_eval_service.domain import EvaluationStatus, Severity
-from skill_eval_service.runner import RunOutcome
+from skillprism.adapter import determine_status, to_dto
+from skillprism.domain import EvaluationStatus, Severity
+from skillprism.runner import RunOutcome
 
 
 def _outcome(exit_code: int = 0, report: dict | None = None, **kwargs) -> RunOutcome:

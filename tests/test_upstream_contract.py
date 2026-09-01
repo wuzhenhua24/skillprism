@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import pytest
 
-from skill_eval_service.domain import Severity
+from skillprism.domain import Severity
 
 
 def test_report_has_fields_adapter_depends_on(upstream_report):

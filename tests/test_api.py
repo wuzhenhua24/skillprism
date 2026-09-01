@@ -5,10 +5,10 @@ from __future__ import annotations
 import pytest
 from fastapi.testclient import TestClient
 
-from skill_eval_service.api.app import app, get_content_source
-from skill_eval_service.config import reset_settings
-from skill_eval_service.content import LocalDirectorySource
-from skill_eval_service.db import init_db, reset_engine
+from skillprism.api.app import app, get_content_source
+from skillprism.config import reset_settings
+from skillprism.content import LocalDirectorySource
+from skillprism.db import init_db, reset_engine
 
 
 @pytest.fixture
@@ -23,9 +23,9 @@ def client(tmp_path, monkeypatch, db_url):
     (skills / "demo").mkdir(parents=True)
     (skills / "demo" / "SKILL.md").write_text("---\nname: demo\n---\nbody\n")
 
-    monkeypatch.setenv("SES_DATABASE_URL", db_url)
-    monkeypatch.setenv("SES_REPORT_ROOT", str(tmp_path / "reports"))
-    monkeypatch.setenv("SES_WORK_ROOT", str(tmp_path / "work"))
+    monkeypatch.setenv("SKILLPRISM_DATABASE_URL", db_url)
+    monkeypatch.setenv("SKILLPRISM_REPORT_ROOT", str(tmp_path / "reports"))
+    monkeypatch.setenv("SKILLPRISM_WORK_ROOT", str(tmp_path / "work"))
     reset_settings()
     reset_engine()
     init_db()

@@ -17,8 +17,8 @@ from alembic.config import Config
 from alembic.migration import MigrationContext
 from sqlalchemy import create_engine
 
-from skill_eval_service.config import reset_settings
-from skill_eval_service.models import Base
+from skillprism.config import reset_settings
+from skillprism.models import Base
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -36,7 +36,7 @@ def test_migrations_produce_the_model_schema(db_url, monkeypatch):
         alembic revision --autogenerate -m "说明"
     """
     url = db_url
-    monkeypatch.setenv("SES_DATABASE_URL", url)
+    monkeypatch.setenv("SKILLPRISM_DATABASE_URL", url)
     reset_settings()
 
     command.upgrade(_alembic_config(), "head")
@@ -64,7 +64,7 @@ def test_downgrade_to_base_is_reachable(db_url, monkeypatch):
     偶尔需要手工补全，这里保证它至少是可执行的。
     """
     url = db_url
-    monkeypatch.setenv("SES_DATABASE_URL", url)
+    monkeypatch.setenv("SKILLPRISM_DATABASE_URL", url)
     reset_settings()
 
     cfg = _alembic_config()

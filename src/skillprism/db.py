@@ -1,4 +1,4 @@
-"""数据库连接与会话。开发用 SQLite，生产替换 SES_DATABASE_URL 即可。"""
+"""数据库连接与会话。开发用 SQLite，生产替换 SKILLPRISM_DATABASE_URL 即可。"""
 
 from __future__ import annotations
 
@@ -9,8 +9,8 @@ from pathlib import Path
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
-from skill_eval_service.config import get_settings
-from skill_eval_service.models import Base
+from skillprism.config import get_settings
+from skillprism.models import Base
 
 _engine = None
 _SessionFactory: sessionmaker[Session] | None = None
@@ -64,7 +64,7 @@ SCHEMA_NOT_READY_HINT = (
 def reset_engine() -> None:
     """丢弃缓存的 engine 与 session 工厂，下次调用按当前配置重建。
 
-    供测试在切换 SES_DATABASE_URL 后调用；生产代码不应使用。
+    供测试在切换 SKILLPRISM_DATABASE_URL 后调用；生产代码不应使用。
     """
     global _engine, _SessionFactory
     if _engine is not None:

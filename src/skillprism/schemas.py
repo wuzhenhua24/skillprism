@@ -10,7 +10,7 @@ from datetime import datetime
 
 from pydantic import BaseModel, Field
 
-from skill_eval_service.domain import EvaluationStatus, Severity, Tier
+from skillprism.domain import EvaluationStatus, Severity, Tier
 
 
 class Finding(BaseModel):

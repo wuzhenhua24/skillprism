@@ -7,9 +7,9 @@ import uuid
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from skill_eval_service.domain import EvaluationStatus, Severity, Tier
-from skill_eval_service.models import EvaluationDetail, EvaluationResult
-from skill_eval_service.schemas import (
+from skillprism.domain import EvaluationStatus, Severity, Tier
+from skillprism.models import EvaluationDetail, EvaluationResult
+from skillprism.schemas import (
     EvaluationDTO,
     EvaluatorInfo,
     Finding,

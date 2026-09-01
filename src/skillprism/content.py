@@ -13,8 +13,8 @@ from urllib.parse import quote
 
 import httpx
 
-from skill_eval_service.archive import ArchiveError, read_skill_zip
-from skill_eval_service.materialize import MAX_FILE_BYTES, SkillFile
+from skillprism.archive import ArchiveError, read_skill_zip
+from skillprism.materialize import MAX_FILE_BYTES, SkillFile
 
 
 class SkillNotFoundError(LookupError):
@@ -67,7 +67,7 @@ class ZipArchiveSource:
     """从管理系统下载 zip 并解出文件。
 
     管理系统按一个 skill 一个 zip 提供内容。下载与解归档分开：这里只负责
-    把字节安全地取回来，归档本身的风险由 :mod:`skill_eval_service.archive`
+    把字节安全地取回来，归档本身的风险由 :mod:`skillprism.archive`
     处理。
 
     下载体积在**流式读取时**卡上限，而不是先收完再检查——否则一个超大响应
@@ -130,7 +130,7 @@ class ZipArchiveSource:
 def build_content_source(settings) -> SkillContentSource:
     """按配置选内容来源。
 
-    配了 ``SES_CONTENT_URL_TEMPLATE`` 就走管理系统的 zip 下载接口，
+    配了 ``SKILLPRISM_CONTENT_URL_TEMPLATE`` 就走管理系统的 zip 下载接口，
     否则退回本地目录——后者只用于开发调试。
     """
     if settings.content_url_template:

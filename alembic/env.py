@@ -16,8 +16,8 @@ from logging.config import fileConfig
 from alembic import context
 from sqlalchemy import engine_from_config, pool
 
-from skill_eval_service.config import get_settings
-from skill_eval_service.models import Base
+from skillprism.config import get_settings
+from skillprism.models import Base
 
 config = context.config
 

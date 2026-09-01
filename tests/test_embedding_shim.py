@@ -13,8 +13,8 @@ import json
 import httpx
 import pytest
 
-from skill_eval_service.config import Settings
-from skill_eval_service.embedding_shim import EmbeddingsRequest, ShimError, embed_batched
+from skillprism.config import Settings
+from skillprism.embedding_shim import EmbeddingsRequest, ShimError, embed_batched
 
 
 def _settings(**kw) -> Settings:

@@ -22,16 +22,16 @@ from pathlib import Path
 
 import pytest
 
-from skill_eval_service import queue as task_queue
-from skill_eval_service.config import get_settings, reset_settings
-from skill_eval_service.content import LocalDirectorySource
-from skill_eval_service.db import init_db, reset_engine, session_scope
-from skill_eval_service.domain import EvaluationStatus
-from skill_eval_service.runner import preflight
-from skill_eval_service.schemas import SubmitRequest
-from skill_eval_service.service import get_evaluation, submit
-from skill_eval_service.storage import LocalReportStorage
-from skill_eval_service.worker import run_once
+from skillprism import queue as task_queue
+from skillprism.config import get_settings, reset_settings
+from skillprism.content import LocalDirectorySource
+from skillprism.db import init_db, reset_engine, session_scope
+from skillprism.domain import EvaluationStatus
+from skillprism.runner import preflight
+from skillprism.schemas import SubmitRequest
+from skillprism.service import get_evaluation, submit
+from skillprism.storage import LocalReportStorage
+from skillprism.worker import run_once
 
 pytestmark = pytest.mark.e2e
 
@@ -88,13 +88,13 @@ def env(tmp_path, monkeypatch, db_url):
 
     policy = Path(__file__).resolve().parent.parent / "profiles" / "internal.yaml"
 
-    monkeypatch.setenv("SES_DATABASE_URL", db_url)
-    monkeypatch.setenv("SES_REPORT_ROOT", str(tmp_path / "reports"))
-    monkeypatch.setenv("SES_WORK_ROOT", str(tmp_path / "work"))
-    monkeypatch.setenv("SES_LOCAL_SKILLS_ROOT", str(skills))
-    monkeypatch.setenv("SES_POLICY_FILE", str(policy))
+    monkeypatch.setenv("SKILLPRISM_DATABASE_URL", db_url)
+    monkeypatch.setenv("SKILLPRISM_REPORT_ROOT", str(tmp_path / "reports"))
+    monkeypatch.setenv("SKILLPRISM_WORK_ROOT", str(tmp_path / "work"))
+    monkeypatch.setenv("SKILLPRISM_LOCAL_SKILLS_ROOT", str(skills))
+    monkeypatch.setenv("SKILLPRISM_POLICY_FILE", str(policy))
     # 扫描器缺失时由 needs_scanners 跳过，这里不再重复拦截。
-    monkeypatch.setenv("SES_REQUIRE_SCANNERS", "false")
+    monkeypatch.setenv("SKILLPRISM_REQUIRE_SCANNERS", "false")
 
     reset_settings()
     reset_engine()
@@ -259,7 +259,7 @@ def test_missing_skill_fails_task_without_result(env):
     run_once(settings=env, source=source, storage=LocalReportStorage(env.report_root))
 
     with session_scope() as db:
-        from skill_eval_service.models import EvaluationTask
+        from skillprism.models import EvaluationTask
 
         refreshed = db.get(EvaluationTask, task_id)
         assert refreshed.state == "failed"

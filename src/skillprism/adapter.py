@@ -11,15 +11,15 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from skill_eval_service.domain import (
+from skillprism.domain import (
     EXIT_CONFIG_ERROR,
     EXIT_RUNTIME_ERROR,
     EvaluationStatus,
     Severity,
     Tier,
 )
-from skill_eval_service.runner import RunOutcome
-from skill_eval_service.schemas import (
+from skillprism.runner import RunOutcome
+from skillprism.schemas import (
     EvaluationDTO,
     EvaluatorInfo,
     Finding,

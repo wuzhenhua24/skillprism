@@ -6,12 +6,12 @@ from pathlib import Path
 
 from sqlalchemy.orm import Session
 
-from skill_eval_service import queue as task_queue
-from skill_eval_service.content import SkillContentSource
-from skill_eval_service.domain import Tier
-from skill_eval_service.materialize import compute_content_hash
-from skill_eval_service.repository import find_result, latest_result, result_to_dto
-from skill_eval_service.schemas import EvaluationDTO, SubmitRequest, SubmitResponse
+from skillprism import queue as task_queue
+from skillprism.content import SkillContentSource
+from skillprism.domain import Tier
+from skillprism.materialize import compute_content_hash
+from skillprism.repository import find_result, latest_result, result_to_dto
+from skillprism.schemas import EvaluationDTO, SubmitRequest, SubmitResponse
 
 
 def submit(

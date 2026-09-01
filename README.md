@@ -1,4 +1,4 @@
-# Skill 评测服务
+# SkillPrism
 
 基于 [SkillEvaluator](https://github.com/NVIDIA/SkillEvaluator) 的评测编排与结果服务，
 把 skill 质量结果回写到公司 skill 管理系统。
@@ -57,13 +57,13 @@ SkillSpector 2.10.0 起对覆盖不完整的扫描 *fail closed*：当
 装齐后启动：
 
 ```bash
-.venv/bin/uvicorn skill_eval_service.api.app:app --reload
+.venv/bin/uvicorn skillprism.api.app:app --reload
 ```
 
 worker 另起一个进程：
 
 ```bash
-.venv/bin/skill-eval-worker
+.venv/bin/skillprism-worker
 ```
 
 部署到服务器见 [docs/deployment.md](docs/deployment.md)（Ubuntu，非容器）。
@@ -215,8 +215,8 @@ skillevaluator validate <skill 目录> --policy ./profiles/internal.yaml -r cli
 留空则退回本地目录（仅开发调试）：
 
 ```bash
-SES_CONTENT_URL_TEMPLATE=https://skills.internal/api/skills/{skill_id}/download
-SES_CONTENT_TOKEN=<服务令牌>
+SKILLPRISM_CONTENT_URL_TEMPLATE=https://skills.internal/api/skills/{skill_id}/download
+SKILLPRISM_CONTENT_TOKEN=<服务令牌>
 ```
 
 `{skill_id}` 会被整体 URL 编码后替换——skill_id 形如 `team/name` 时不会
@@ -225,7 +225,7 @@ SES_CONTENT_TOKEN=<服务令牌>
 ### 解归档是我们的安全边界
 
 物化层防的是**路径**，不是**归档格式**。以下四类风险由
-[`archive.py`](src/skill_eval_service/archive.py) 处理，它挡不住：
+[`archive.py`](src/skillprism/archive.py) 处理，它挡不住：
 
 | 风险 | 防线 |
 | --- | --- |
@@ -265,10 +265,10 @@ my-skill/scripts/run.sh
 ```
 
 数据库地址由 `tests/conftest.py` 的 `db_url` 夹具统一提供，默认 SQLite。
-设置 `SES_TEST_DATABASE_URL` 可让整套测试跑在 PostgreSQL 上：
+设置 `SKILLPRISM_TEST_DATABASE_URL` 可让整套测试跑在 PostgreSQL 上：
 
 ```bash
-SES_TEST_DATABASE_URL='postgresql+psycopg://user:pass@host:5432/postgres' \
+SKILLPRISM_TEST_DATABASE_URL='postgresql+psycopg://user:pass@host:5432/postgres' \
   .venv/bin/python -m pytest -q
 ```
 
@@ -314,7 +314,7 @@ SKILL_EVAL_EMBEDDING_MODEL=doubao-embedding-vision
 SKILL_EVAL_EMBEDDING_API_KEY=<ARK_API_KEY>
 ```
 
-调用方带来的 `Authorization` 会被转发给方舟，没带时回落到 `SES_ARK_API_KEY`。
+调用方带来的 `Authorization` 会被转发给方舟，没带时回落到 `SKILLPRISM_ARK_API_KEY`。
 **shim 会转发凭据，不要暴露到公网**，只在 worker 可达的内网或本机监听。
 
 两个正确性要点，都有测试覆盖：

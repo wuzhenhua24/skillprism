@@ -1,7 +1,7 @@
 """测试夹具。
 
 数据库地址由 ``db_url`` 夹具统一提供：默认 SQLite（每个测试一个临时文件，
-天然隔离、跑得快），设置 ``SES_TEST_DATABASE_URL`` 后改用 PostgreSQL。
+天然隔离、跑得快），设置 ``SKILLPRISM_TEST_DATABASE_URL`` 后改用 PostgreSQL。
 
 为什么要能跑两种库：生产用 PG、开发用 SQLite，两者的行为并不一致。最要紧的
 是 ``queue.claim_next`` 里的 ``SKIP LOCKED`` 分支——在 SQLite 上它必然抛异常、
@@ -25,7 +25,7 @@ FIXTURES = Path(__file__).parent / "fixtures"
 #: 设置本环境变量即让整套测试跑在 PostgreSQL 上，例如
 #: postgresql+psycopg://user:pass@testbox:5432/postgres
 #: 指向的库只用来建/删临时测试库，本身不会被改动。
-PG_ENV_VAR = "SES_TEST_DATABASE_URL"
+PG_ENV_VAR = "SKILLPRISM_TEST_DATABASE_URL"
 
 
 @pytest.fixture

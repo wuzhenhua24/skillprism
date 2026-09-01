@@ -6,7 +6,7 @@
 
 跑 PG 版：
 
-    SES_TEST_DATABASE_URL='postgresql+psycopg://user:pass@host:5432/postgres' \\
+    SKILLPRISM_TEST_DATABASE_URL='postgresql+psycopg://user:pass@host:5432/postgres' \\
       pytest tests/test_queue_concurrency.py
 """
 
@@ -18,13 +18,13 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from skill_eval_service.models import Base, EvaluationTask
-from skill_eval_service.queue import claim_next, enqueue
+from skillprism.models import Base, EvaluationTask
+from skillprism.queue import claim_next, enqueue
 from tests.conftest import PG_ENV_VAR
 
 
 def test_configured_backend_actually_engages(db_url):
-    """设了 SES_TEST_DATABASE_URL 就必须真的跑在 PostgreSQL 上。
+    """设了 SKILLPRISM_TEST_DATABASE_URL 就必须真的跑在 PostgreSQL 上。
 
     这条是防"以为验证过了、其实一直在跑 SQLite"——那是最坏的情况，
     因为它给出的是虚假的信心。

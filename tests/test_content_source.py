@@ -8,14 +8,14 @@ import zipfile
 import httpx
 import pytest
 
-from skill_eval_service.content import (
+from skillprism.content import (
     ContentFetchError,
     LocalDirectorySource,
     SkillNotFoundError,
     ZipArchiveSource,
     build_content_source,
 )
-from skill_eval_service.config import Settings
+from skillprism.config import Settings
 
 TEMPLATE = "https://mgmt.example/api/skills/{skill_id}/download"
 MANIFEST = b"---\nname: demo\ndescription: A demo skill.\n---\n\n# Demo\n"
@@ -42,7 +42,7 @@ def patch_client(monkeypatch):
             kwargs["transport"] = httpx.MockTransport(handler)
             return real_client(*args, **kwargs)
 
-        monkeypatch.setattr("skill_eval_service.content.httpx.Client", factory)
+        monkeypatch.setattr("skillprism.content.httpx.Client", factory)
 
     return apply
 

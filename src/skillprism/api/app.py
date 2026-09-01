@@ -10,16 +10,16 @@ from fastapi import Depends, FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
-from skill_eval_service import service
-from skill_eval_service.config import get_settings
-from skill_eval_service.content import SkillContentSource, SkillNotFoundError, build_content_source
-from skill_eval_service.db import SCHEMA_NOT_READY_HINT, get_session_factory, schema_is_ready
-from skill_eval_service.embedding_shim import router as embedding_shim_router
-from skill_eval_service.materialize import MaterializeError, UnsafePathError
-from skill_eval_service.models import EvaluationTask
-from skill_eval_service.repository import latest_result
-from skill_eval_service.runner import preflight
-from skill_eval_service.schemas import EvaluationDTO, SubmitRequest, SubmitResponse
+from skillprism import service
+from skillprism.config import get_settings
+from skillprism.content import SkillContentSource, SkillNotFoundError, build_content_source
+from skillprism.db import SCHEMA_NOT_READY_HINT, get_session_factory, schema_is_ready
+from skillprism.embedding_shim import router as embedding_shim_router
+from skillprism.materialize import MaterializeError, UnsafePathError
+from skillprism.models import EvaluationTask
+from skillprism.repository import latest_result
+from skillprism.runner import preflight
+from skillprism.schemas import EvaluationDTO, SubmitRequest, SubmitResponse
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
@@ -30,7 +30,7 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(
-    title="Skill 评测服务",
+    title="SkillPrism",
     description="基于 SkillEvaluator 的 Tier 1 评测编排与结果服务",
     version="0.1.0",
     lifespan=lifespan,
