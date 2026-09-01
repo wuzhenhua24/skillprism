@@ -29,7 +29,17 @@ class LocalReportStorage:
         self.root = Path(root).resolve()
 
     def _dir_for(self, content_hash: str) -> Path:
-        # 去掉 "sha256:" 前缀，按前两位分桶，避免单目录文件过多。
+        """报告目录只由 content_hash 决定，按前两位分桶避免单目录文件过多。
+
+        注意路径里**没有 skill_id**：两个内容字节相同的 skill 会共用同一个
+        报告目录。这不是假想——团队之间抄 skill 很常见，Tier 2 去重存在的
+        理由就是这个。数据库里 (skill_id, content_hash) 是联合唯一，
+        所以多行可以指向同一份文件。
+
+        因此将来实现报告清理时**必须先做引用计数**：删一个 content_hash
+        目录前，确认没有别的 evaluation_result 行还引用它。写成
+        "删掉某个 skill 的旧报告" 会连带删掉别的 skill 正在用的报告。
+        """
         digest = content_hash.split(":", 1)[-1]
         return self.root / digest[:2] / digest
 
