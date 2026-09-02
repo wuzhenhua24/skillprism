@@ -166,6 +166,7 @@ def to_dto(
     *,
     skill_id: str,
     content_hash: str,
+    skill_version: str | None = None,
     outcome: RunOutcome,
     report_url: str | None = None,
     evaluator_version: str | None = None,
@@ -213,6 +214,8 @@ def to_dto(
 
     return EvaluationDTO(
         skill_id=skill_id,
+        # 版本号来自触发方，不在上游报告里，原样透传。
+        skill_version=skill_version,
         content_hash=content_hash,
         status=status,
         gate_passed=raw_passed if isinstance(raw_passed, bool) else None,

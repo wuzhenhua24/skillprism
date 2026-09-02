@@ -12,7 +12,6 @@ from sqlalchemy.orm import Session
 
 from skillprism import service
 from skillprism.config import get_settings
-from skillprism.content import SkillContentSource, SkillNotFoundError, build_content_source
 from skillprism.db import SCHEMA_NOT_READY_HINT, get_session_factory, schema_is_ready
 from skillprism.embedding_shim import router as embedding_shim_router
 from skillprism.materialize import MaterializeError, UnsafePathError
@@ -54,11 +53,6 @@ def get_db() -> Session:
         session.close()
 
 
-def get_content_source() -> SkillContentSource:
-    """内容来源。接入管理系统时替换这个依赖即可，其余代码不动。"""
-    return build_content_source(get_settings())
-
-
 @app.get("/healthz")
 def healthz() -> dict:
     """健康检查。同时暴露扫描器状态——缺失意味着结果会是 incomplete。"""
@@ -71,19 +65,23 @@ def healthz() -> dict:
     }
 
 
-@app.post("/api/evaluations", response_model=SubmitResponse)
+@app.post("/api/evaluations", response_model=SubmitResponse, status_code=202)
 def submit_evaluation(
     request: SubmitRequest,
     session: Session = Depends(get_db),
-    source: SkillContentSource = Depends(get_content_source),
 ) -> SubmitResponse:
+    """触发一次评测。202 表示受理，不表示评完。
+
+    这里不下载内容，因此也不会返回“skill 不存在”——那要等 worker 真的去取
+    才知道，届时体现为任务的 error 状态。取不到多半是网络抖动或包还没落盘，
+    把它长成一个同步的 4xx 会让调用方以为是自己请求错了。
+    """
     if request.tier not in service.IMPLEMENTED_TIERS:
         raise HTTPException(status_code=501, detail=f"{request.tier} 尚未实现，当前仅支持 tier1")
     try:
-        return service.submit(session, source, request)
-    except SkillNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        return service.submit(session, request)
     except (UnsafePathError, MaterializeError) as exc:
+        # 只可能来自 skill_name 校验：这个字段是调用方直接给的，当场就能改。
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
@@ -95,6 +93,9 @@ def get_task(task_id: str, session: Session = Depends(get_db)) -> dict:
     return {
         "task_id": task.id,
         "skill_id": task.skill_id,
+        "skill_name": task.skill_name,
+        "skill_version": task.skill_version,
+        # 入队时为空，worker 下载完内容才填上。
         "content_hash": task.content_hash,
         "tier": task.tier,
         "queue": task.queue,

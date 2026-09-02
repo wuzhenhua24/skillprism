@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
@@ -140,6 +141,26 @@ def _locate_reports(out_dir: Path) -> tuple[Path | None, Path | None]:
         json_candidates[-1] if json_candidates else None,
         html_candidates[-1] if html_candidates else None,
     )
+
+
+def policy_file_hash(settings: Settings) -> str:
+    """当前策略文件的指纹，用于判断既有结论还能不能复用。
+
+    报告里的 ``policy.digest`` 是上游算的，只有跑完评测才拿得到，
+    没法用来决定"要不要跑"。所以这里自己算一份。
+
+    ``--policy`` 是 overlay 在评测器包内的基础 profile 之上的，
+    基础 profile 随评测器版本走，所以 (evaluator_version, 本指纹)
+    合起来才刻画了实际生效的策略。
+
+    读不到文件时返回空串——宁可不复用去重跑一遍，也不要拿一个
+    含义不明的指纹去匹配。
+    """
+    try:
+        data = Path(settings.policy_file).read_bytes()
+    except OSError:
+        return ""
+    return f"sha256:{hashlib.sha256(data).hexdigest()}"
 
 
 def run_validate(settings: Settings, skill_dir: Path, out_dir: Path) -> RunOutcome:

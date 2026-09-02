@@ -211,16 +211,123 @@ skillevaluator validate <skill 目录> --policy ./profiles/internal.yaml -r cli
 
 ## 对接管理系统
 
-管理系统按**一个 skill 一个 zip** 的方式提供内容。配上 URL 模板即可切换，
+用户上传完 skill 后，管理系统调用触发接口；内容由本服务反向去它那里下载。
+
+### 触发接口
+
+```http
+POST /api/evaluations
+```
+
+```json
+{
+  "skill_id": "2000705",
+  "skill_name": "skill-file-md5",
+  "skill_version": "2.0.0",
+  "tier": "tier1",
+  "force": false
+}
+```
+
+回 `202` 与 `{task_id, skill_id, state, deduplicated}`。三条语义要说清：
+
+**`skill_name` 是必填的，不能省。** 物化目录用它命名，SkillEvaluator 的
+`SCHEMA.name_consistency`（HIGH）会拿目录名和 frontmatter 的 `name` 比对。
+管理系统的 skill_id 是纯数字资源 ID，拿它当目录名会让**每个** skill 都平白
+多一条 HIGH。也不能拿包里的目录名或 frontmatter 自己回填——那样这条检查
+恒真，等于废掉。要的是管理系统里**登记的**那个名字，它独立于用户打的包，
+比对才有意义。`tests/test_e2e_tier1.py` 里的
+`test_directory_is_named_by_registered_name_not_skill_id` 两个方向都锁了。
+
+管理系统在**上传口**就校验了"包名与文件内技能名一致"，不一致传不上来。
+所以 `name_consistency` 在我们这里正常情况下**不可能报**——它已经不是一个
+质量信号，而是一枚**契约探针**：报了就说明对方那道校验被绕过、被放宽，
+或者两边的归一化规则不一样（大小写、空格、Unicode 形式）。
+
+正因如此，`skill_name` 仍然要由触发方传，**不能改成我们自己去解包里的
+frontmatter**。从包里取等于自己和自己比，探针就废了；从对方的登记记录取，
+两边才是两个可以互相印证的来源。这也是不把这条检查在 `internal.yaml` 里
+关掉的理由：它不产生噪声（永远不报），却能在集成出问题时立刻出声。
+
+**202 是受理，不是评完，也不代表 skill 存在。** 提交路径上没有任何网络调用：
+这个接口挂在用户的上传流程后面，同步下载意味着对方要承担我们的网络耗时
+（超时上限 60s、包上限 64MB）和可用性。定位是"只展示不拦截"，我们挂了不该
+反映到他们的上传体验上。代价是"取不到这个 skill"要等 worker 真去取才知道，
+届时体现为任务的 `error` 状态，而不是一个同步的 4xx——取不到多半是网络抖动
+或包还没落盘，长成 4xx 会让调用方以为是自己请求错了。
+
+**重复触发会折叠。** 对方超时重发、用户连点保存都会重复触发，排队中的同一个
+skill 收敛成一条任务，`deduplicated: true`。已经在跑的任务不折叠——它已经下载
+过内容，跑的是更早的那一份；这种情况由 worker 的缓存判定兜住：内容确实没变
+时第二条任务算出同一个 hash，直接复用结论，不会真的重跑评测器。
+
+调用方还要注意两点：**触发要在 zip 落盘可下载之后**，不要和上传放在同一个
+事务里；**我们返回非 200 不应该让上传失败**，重试几次仍失败就放弃，另配一个
+对账任务扫"有包但没结果"的 skill。
+
+### 只评 Skills 分类
+
+管理系统还托管 Commands / Agents / Hooks，它们的包里没有 `SKILL.md`，
+SkillEvaluator 评不了。**由触发方保证只对 Skills 分类调用**，因此契约里
+没有 `category` 字段。
+
+万一漏进来，失败是安全的：解归档时找不到 `SKILL.md`，任务报错落在
+`error` 上，不会产出结果、更不会发出徽章。报错文案专门和"包损坏"区分开
+（`不是一个可评测的 skill`），因为这两种情况的处理方式完全不同——
+一个是找触发方，一个是找上传的用户。
+
+### 资源 ID 每次上传都会变，所以结论按内容复用
+
+管理系统里**重新上传会产生一个新的资源 ID**，版本号则是用户在上传表单里
+单独填的一个自由文本（和包内 frontmatter 的版本不是一回事）。两件事合起来
+意味着"传同一个 zip、只改版本号"是个很自然的操作。
+
+如果缓存按 (skill_id, content_hash) 找，它跨上传永远不命中：同样的字节会被
+评第二次，分数可能因为 LLM 或扫描器抖动而不同。用户看到的是"我什么都没改，
+分数怎么变了"。
+
+所以复用**按内容找，不看 skill_id**，命中就把结论克隆一份挂到新资源 ID 名下
+（报告本来就按 content_hash 寻址，文件不复制）。代价是判据必须严，
+三条缺一不可：
+
+| 条件 | 不卡住会怎样 |
+| --- | --- |
+| `evaluator_version` 相同 | 换了评测器还给旧结论，正是"分数怎么变了"最难查的形态 |
+| `policy_file_hash` 相同 | 策略是"起点不是定论"，调完不重评，新策略对存量 skill 不生效 |
+| `incomplete_scans` 为空 | 把一次没跑全的扫描永久固化下来 |
+
+`policy_file_hash` 是我们自己算的策略文件指纹。报告里的 `policy.digest` 来自
+上游、跑完才知道，判不了"要不要跑"。迁移之前写下的结论没有这个指纹，
+一律重跑——安全的方向。
+
+**没**卡住的是外部扫描器自身的版本（semgrep / skillspector / gitleaks）。
+它们漂移时复用会给出旧结论，逃生口是 `force=true`。判据全部由
+`tests/test_result_reuse.py` 钉住。
+
+### 内容下载
+
+管理系统按**一个 skill 一个 zip** 提供内容。配上 URL 模板即可切换，
 留空则退回本地目录（仅开发调试）：
 
 ```bash
-SKILLPRISM_CONTENT_URL_TEMPLATE=https://skills.internal/api/skills/{skill_id}/download
+SKILLPRISM_CONTENT_URL_TEMPLATE=http://<manager>/lingxi-manager/api/resource/{skill_id}/download
 SKILLPRISM_CONTENT_TOKEN=<服务令牌>
 ```
 
 `{skill_id}` 会被整体 URL 编码后替换——skill_id 形如 `team/name` 时不会
 改变 URL 的路径结构。令牌作为 `Bearer` 发送。
+
+只有 **worker** 需要能访问管理系统，API 进程不需要。这是刻意的隔离，
+部署时可以据此收紧网络策略。
+
+### 结果怎么回去
+
+先轮询，不做 webhook：详情页渲染时直接调
+`GET /api/skills/{skill_id}/evaluation`。webhook 要带重试、退避、签名和幂等，
+为一个不拦截的徽章现在上不划算；真需要"评完立刻亮徽章"时，
+再在触发 payload 里加可选的 `callback_url`。
+
+列表页会出现 N 次单查（50 个 skill 打 50 次），需要时补一个批量查询接口。
 
 ### 解归档是我们的安全边界
 
@@ -333,5 +440,7 @@ SKILL_EVAL_EMBEDDING_API_KEY=<ARK_API_KEY>
   单个 catalog 建库上限 256 个 skill，实测单条记录约 51 KB。
   `queue.py` 的 `index` 队列与 DTO 的 `tiers.tier2` 已预留。
 - **Tier 3**：需要 Docker/K8s 沙箱、agent 凭据、评测预算。`sandbox` 队列与 `tiers.tier3` 已预留。
-- **迁移**：当前用 `Base.metadata.create_all`，接正式库前换 Alembic。
+- **扫描器版本未纳入复用判据**：见上面「结论按内容复用」。
+- **批量查询结果**：列表页按 skill_id 逐个查会打 N 次，需要时补。
+- **结果回调**：当前只支持轮询，见上面「结果怎么回去」。
 - **鉴权**：API 尚无认证，接入前需补。

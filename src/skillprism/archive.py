@@ -148,7 +148,10 @@ def read_skill_zip(data: bytes) -> list[SkillFile]:
             seen.add(path)
 
         if SKILL_MANIFEST not in seen:
-            raise ArchiveError(f"归档根目录缺少 {SKILL_MANIFEST}")
+            # 措辞要和"包损坏"区分开：内容下下来了、也解开了，只是它不是
+            # 一个 skill。管理系统还托管 Commands / Agents / Hooks 等分类，
+            # 那些包里本来就没有 SKILL.md，报"归档无法解出"会把人带偏。
+            raise ArchiveError(f"归档根目录缺少 {SKILL_MANIFEST}，不是一个可评测的 skill")
 
         files: list[SkillFile] = []
         actual_total = 0

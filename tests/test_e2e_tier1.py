@@ -108,18 +108,37 @@ def env(tmp_path, monkeypatch, db_url):
     reset_settings()
 
 
-def _evaluate(settings, *, skill_id: str = SKILL_ID):
+def _evaluate(
+    settings,
+    *,
+    skill_id: str = SKILL_ID,
+    skill_name: str = SKILL_ID,
+    version: str | None = None,
+    force: bool = False,
+):
     """跑完整条流水线，返回最终 DTO。"""
     source = LocalDirectorySource(settings.local_skills_root)
     storage = LocalReportStorage(settings.report_root)
 
     with session_scope() as db:
-        submit(db, source, SubmitRequest(skill_id=skill_id))
+        submit(
+            db,
+            SubmitRequest(
+                skill_id=skill_id,
+                skill_name=skill_name,
+                skill_version=version,
+                force=force,
+            ),
+        )
 
     assert run_once(settings=settings, source=source, storage=storage), "worker 没有取到任务"
 
     with session_scope() as db:
         return get_evaluation(db, skill_id)
+
+
+def _check_names(dto) -> list[str]:
+    return [f.check_name for v in dto.tiers.tier1.validators for f in v.findings]
 
 
 @needs_cli
@@ -212,17 +231,68 @@ def test_reports_are_persisted_and_readable(env):
 
 @needs_cli
 def test_unchanged_content_hits_cache(env):
-    """内容没变就不该重跑——既省成本，也避免结论无谓抖动。"""
+    """内容没变就不该重跑——既省成本，也避免结论无谓抖动。
+
+    缓存判定在 worker 里（提交时还没下载，看不见内容），所以第二次触发
+    照样会排出任务、worker 照样会取走它。区别在于它算完 hash 就复用已有
+    结论，不会再启动评测器——``evaluated_at`` 没变就是没重跑。
+    """
     first = _evaluate(env)
 
-    source = LocalDirectorySource(env.local_skills_root)
-    with session_scope() as db:
-        again = submit(db, source, SubmitRequest(skill_id=SKILL_ID))
-    assert again.cached is True
-    assert again.content_hash == first.content_hash
+    second = _evaluate(env)
+    assert second.content_hash == first.content_hash
+    assert second.evaluated_at == first.evaluated_at, "内容没变却重跑了评测器"
 
-    # 命中缓存时不产生新任务，worker 应当无事可做
-    assert run_once(settings=env, source=source, storage=LocalReportStorage(env.report_root)) is False
+
+@needs_cli
+def test_same_content_under_a_new_resource_id_is_not_re_evaluated(env):
+    """管理系统每次上传都换资源 ID，版本号则是上传时单独填的。
+
+    也就是说"传同一个 zip、只改版本号"是个很自然的操作。按资源 ID 找缓存
+    永远不命中，同样的字节会被评第二次——分数可能因为 LLM 或扫描器抖动而
+    不同，用户看到的就是"我什么都没改，分数怎么变了"。
+    """
+    # 两次上传，两个资源 ID，内容一模一样。
+    for resource_id in ("2000705", "2000706"):
+        shutil.copytree(env.local_skills_root / SKILL_ID, env.local_skills_root / resource_id)
+
+    first = _evaluate(env, skill_id="2000705", skill_name=SKILL_ID, version="1.0.0")
+    second = _evaluate(env, skill_id="2000706", skill_name=SKILL_ID, version="1.0.1")
+
+    assert second.content_hash == first.content_hash
+    assert second.evaluated_at == first.evaluated_at, "同样的内容被重评了"
+    assert second.score == first.score
+    # 复用的结论要挂到新资源 ID 名下，并带上本次的版本号。
+    assert second.skill_version == "1.0.1"
+
+
+@needs_cli
+@needs_scanners
+def test_directory_is_named_by_registered_name_not_skill_id(env):
+    """物化目录取登记名，不取 skill_id。
+
+    管理系统的 skill_id 是纯数字的资源 ID（形如 2000705）。拿它当目录名，
+    SCHEMA.name_consistency 会对**每个** skill 都报一条 HIGH——那是我们的
+    命名造成的，不是 skill 的问题。
+    """
+    resource_id = "2000705"
+    shutil.copytree(env.local_skills_root / SKILL_ID, env.local_skills_root / resource_id)
+
+    matched = _evaluate(env, skill_id=resource_id, skill_name=SKILL_ID)
+    assert "name_consistency" not in _check_names(matched), "目录命名制造了误报"
+
+    # 反过来确认这条检查是活的。管理系统在上传口就卡住了"包名与文件内技能名
+    # 一致"，所以线上它永远不会报——它已经不是质量信号，而是一枚契约探针：
+    # 报了就说明对方那道校验被绕过或被放宽。探针本身必须是活的，
+    # 否则上面那句"没有误报"什么也不说明。
+    # 内容没变，不 force 就会复用结论、根本不会重跑评测器。
+    mismatched = _evaluate(
+        env, skill_id=resource_id, skill_name="not-the-registered-name", force=True
+    )
+    assert "name_consistency" in _check_names(mismatched), (
+        "登记名与 frontmatter 不一致时这条检查没报——探针已经失效，"
+        "管理系统的上传校验将来出问题时我们不会知道"
+    )
 
 
 @needs_cli
@@ -253,7 +323,7 @@ def test_missing_skill_fails_task_without_result(env):
     """
     source = LocalDirectorySource(env.local_skills_root)
     with session_scope() as db:
-        task = task_queue.enqueue(db, skill_id="does-not-exist", content_hash="sha256:0")
+        task = task_queue.enqueue(db, skill_id="does-not-exist", skill_name="does-not-exist")
         task_id = task.id
 
     run_once(settings=env, source=source, storage=LocalReportStorage(env.report_root))

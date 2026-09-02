@@ -1,8 +1,11 @@
 """Worker：把队列里的任务跑完并落库。
 
 一次任务的完整链路：
-    取任务 → 拉内容 → 算 hash → 物化 → 子进程评测 → adapter 翻译
+    取任务 → 拉内容 → 算 hash → 查缓存 → 物化 → 子进程评测 → adapter 翻译
     → 报告入存储 → 摘要入库 → 清理临时目录
+
+下载放在这里而不是提交时：触发接口挂在管理系统的上传流程后面，
+不能让它承担我们的网络耗时和可用性。代价是缓存判定也只能在这里做。
 """
 
 from __future__ import annotations
@@ -25,8 +28,8 @@ from skillprism.materialize import (
     materialize,
 )
 from skillprism.models import EvaluationTask
-from skillprism.repository import save_result
-from skillprism.runner import PreflightError, require_ready, run_validate
+from skillprism.repository import clone_result, find_reusable_result, save_result
+from skillprism.runner import PreflightError, policy_file_hash, require_ready, run_validate
 from skillprism.storage import LocalReportStorage, ReportStorage
 
 logger = logging.getLogger(__name__)
@@ -56,9 +59,36 @@ def process_task(
     content_hash = compute_content_hash(files)
     task.content_hash = content_hash
 
-    # 目录名取 skill_id 的最后一段：SkillEvaluator 会拿它和 frontmatter 的
-    # name 比对，用固定名会让每个 skill 都平白多一条 HIGH 问题。
-    skill_name = task.skill_id.rstrip("/").split("/")[-1]
+    policy_hash = policy_file_hash(settings)
+
+    # 缓存判定在这里，不在提交时——提交时还没下载，看不见内容。
+    # 判据里没有 skill_id：管理系统每次上传都换一个资源 ID，按 ID 找永远
+    # 不命中，而"同一个 zip 只改版本号"是他们上传表单下很自然的操作。
+    # 复用的三个前提见 find_reusable_result。
+    if not task.force:
+        reusable = find_reusable_result(
+            session,
+            content_hash,
+            evaluator_version=evaluator_version,
+            policy_file_hash=policy_hash,
+        )
+        if reusable is not None:
+            if reusable.skill_id != task.skill_id:
+                # 别的资源 ID 评过同样的内容，挂一份到本次的 ID 上。
+                clone_result(
+                    session,
+                    reusable,
+                    skill_id=task.skill_id,
+                    skill_version=task.skill_version,
+                )
+            task_queue.finish(session, task)
+            return EvaluationStatus(reusable.status)
+
+    # 目录名用管理系统里登记的 skill 名：SkillEvaluator 的
+    # SCHEMA.name_consistency 会拿它和 frontmatter 的 name 比对。用固定名或
+    # skill_id（可能是纯数字的资源 ID）都会让每个 skill 都平白多一条 HIGH。
+    # 回落到 skill_id 末段只为兼容 skill_name 落库之前排下的存量任务。
+    skill_name = task.skill_name or task.skill_id.rstrip("/").split("/")[-1]
 
     try:
         skill_root = materialize(files, skill_dir, name=skill_name)
@@ -72,6 +102,7 @@ def process_task(
 
         dto = to_dto(
             skill_id=task.skill_id,
+            skill_version=task.skill_version,
             content_hash=content_hash,
             outcome=outcome,
             evaluator_version=evaluator_version,
@@ -95,7 +126,13 @@ def process_task(
                 task_queue.finish(session, task, error=reason)
             return EvaluationStatus.ERROR
 
-        save_result(session, dto, report_json_uri=json_uri, report_html_uri=html_uri)
+        save_result(
+            session,
+            dto,
+            report_json_uri=json_uri,
+            report_html_uri=html_uri,
+            policy_file_hash=policy_hash,
+        )
         task_queue.finish(session, task)
         return dto.status
     finally:

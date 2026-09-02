@@ -140,10 +140,12 @@ def _validate_budget(files: Sequence[SkillFile]) -> None:
 def materialize(files: Sequence[SkillFile], dest: Path, *, name: str) -> Path:
     """把内容写进 ``dest/skills/<name>/``，返回该 skill 目录。
 
-    *name* 必须是 skill 的标识名（通常取 skill_id 的最后一段）。目录名会被
-    SkillEvaluator 的 SCHEMA.name_consistency 检查拿去和 frontmatter 的 name
-    比对，所以不能用 "skill" 这类固定名——否则每个 skill 都会平白多一条
-    HIGH 问题。用真实标识名后，这条检查才回归它本来的语义：
+    *name* 必须是 skill 在管理系统里**登记的名字**（由触发方随请求给出）。
+    目录名会被 SkillEvaluator 的 SCHEMA.name_consistency 检查拿去和
+    frontmatter 的 name 比对，所以不能用 "skill" 这类固定名，也不能用纯数字
+    的资源 ID——否则每个 skill 都会平白多一条 HIGH 问题。同样不能拿包里的
+    目录名或 frontmatter 自己回填：那样这条检查恒真，等于把它废掉。
+    用登记名，这条检查才回归它本来的语义：
     “登记的 skill 标识与 frontmatter 声明不一致”。
 
     *dest* 必须不存在或为空目录——复用已有目录会让上一次评测的残留混进本次结果。

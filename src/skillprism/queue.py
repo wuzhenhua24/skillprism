@@ -26,22 +26,51 @@ QUEUE_BY_TIER = {
 }
 
 
+def find_queued(session: Session, skill_id: str, tier: Tier) -> EvaluationTask | None:
+    """找一条同 skill 同 tier、尚未开跑的任务。
+
+    只看 queued，不看 running：running 的任务**已经下载过内容**，它跑的是
+    更早的那一份。把新的触发折叠进去，就等于宣称评了新内容却给出旧结论。
+    running 期间的重复触发交给 worker 的缓存判定收敛——内容确实没变时，
+    第二条任务算出同一个 hash，命中已有结果，不会真的重跑评测器。
+    """
+    stmt = (
+        select(EvaluationTask)
+        .where(
+            EvaluationTask.skill_id == skill_id,
+            EvaluationTask.tier == str(tier),
+            EvaluationTask.state == str(TaskState.QUEUED),
+        )
+        .order_by(EvaluationTask.created_at)
+        .limit(1)
+    )
+    return session.execute(stmt).scalar_one_or_none()
+
+
 def enqueue(
     session: Session,
     *,
     skill_id: str,
-    content_hash: str,
+    skill_name: str | None = None,
     skill_version: str | None = None,
+    content_hash: str | None = None,
     tier: Tier = Tier.TIER1,
+    force: bool = False,
 ) -> EvaluationTask:
+    """排一条任务。
+
+    ``content_hash`` 通常为空：内容由 worker 下载，入队时还不知道 hash。
+    """
     task = EvaluationTask(
         id=str(uuid.uuid4()),
         skill_id=skill_id,
+        skill_name=skill_name,
         skill_version=skill_version,
         content_hash=content_hash,
         tier=str(tier),
         queue=QUEUE_BY_TIER[tier],
         state=str(TaskState.QUEUED),
+        force=force,
     )
     session.add(task)
     session.flush()

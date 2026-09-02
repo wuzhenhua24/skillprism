@@ -137,8 +137,14 @@ def test_rejects_too_many_entries():
 
 
 def test_requires_manifest_at_root():
+    """没有 SKILL.md 的包要被明确指认为"不是 skill"，而不是"包坏了"。
+
+    管理系统还托管 Commands / Agents / Hooks，那些包里本来就没有
+    SKILL.md。两种情况的处理方式完全不同——一个找触发方查过滤，
+    一个找上传的用户——所以文案必须分得开。
+    """
     data = build_zip([("README.md", b"x"), ("docs/a.md", b"y")])
-    with pytest.raises(ArchiveError, match="SKILL.md"):
+    with pytest.raises(ArchiveError, match="不是一个可评测的 skill"):
         read_skill_zip(data)
 
 

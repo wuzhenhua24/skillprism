@@ -67,6 +67,8 @@ class TierBundle(BaseModel):
 
 class EvaluationDTO(BaseModel):
     skill_id: str
+    #: 触发方声明的版本号。content_hash 标识内容，这个标识人看得懂的版本。
+    skill_version: str | None = None
     content_hash: str
     status: EvaluationStatus
     #: 阻断级检查是否全部通过。与 status 正交：status 为 incomplete 时
@@ -84,19 +86,38 @@ class EvaluationDTO(BaseModel):
 
 
 class SubmitRequest(BaseModel):
-    """管理系统提交评测。内容本身由 content source 按 skill_id/version 取。"""
+    """管理系统触发评测。
 
+    只声明"评哪个 skill"，内容由 worker 按 skill_id 去管理系统下载。
+    提交时不下载：这个调用挂在用户上传流程后面，不能被我们的网络耗时
+    或服务可用性拖住——定位是"只展示不拦截"，那这种耦合就不该存在。
+    """
+
+    #: 管理系统里的资源 ID，也是拼下载地址用的那个 ID。
     skill_id: str
-    skill_version: str | None = None
+    #: 管理系统里登记的 skill 名，必填。物化目录用它命名，
+    #: SkillEvaluator 的 SCHEMA.name_consistency 会拿它和 frontmatter 比对。
+    #: 用 skill_id（数字 ID）代替会让每个 skill 都平白多一条 HIGH。
+    skill_name: str = Field(min_length=1, max_length=255)
+    #: 用户在管理系统上传时手填的自由文本，与包内 frontmatter 的版本无关。
+    #: 上限必须在这里卡住：超长时 PostgreSQL 会抛错而 SQLite 照单全收，
+    #: 那是只在生产暴露的故障。
+    skill_version: str | None = Field(default=None, max_length=128)
     tier: Tier = Tier.TIER1
     #: 内容未变时默认复用已有结果；置 true 强制重跑。
     force: bool = False
 
 
 class SubmitResponse(BaseModel):
+    """受理回执，不是评测结果。
+
+    刻意不含 content_hash：提交时还没下载内容，此刻给不出真实的 hash，
+    给一个占位值只会让调用方以为它有意义。hash 在任务状态与结果里给。
+    """
+
     task_id: str
     skill_id: str
-    content_hash: str
     state: str
-    #: 命中缓存直接返回既有结果，未产生新任务。
-    cached: bool = False
+    #: 折叠到了一条已排队的同 skill 任务上，未新建任务。
+    #: 触发接口天然会被重试，这里如实告知而不是静默合并。
+    deduplicated: bool = False

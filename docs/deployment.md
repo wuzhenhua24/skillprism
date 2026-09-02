@@ -390,7 +390,9 @@ worker 写的报告，所以两者必须同机。要真正横向扩展需要先�
 | worker 启动即退出，日志写"启动自检未通过" | 扫描器缺失或 PATH 不对 | 检查 unit 里的 `Environment=PATH`，确认四个工具都能找到 |
 | `status` 一直是 `incomplete`，`incomplete_scans` 含 `skillspector` | 装了 2.10.0 及以上版本 | 降回 v2.9.6 |
 | 所有 skill 都报 `SCHEMA.author_missing` | `internal.yaml` 的邮箱域名还是 `example.com` | 改成公司域名 |
-| 每个 skill 都多出 `name_consistency` / `folder_hierarchy` | 物化布局异常 | 应当不会发生，若出现说明 `skill_id` 末段与 frontmatter 的 `name` 系统性不一致，需要判断是真问题还是命名规则差异 |
+| 出现 `name_consistency` | 管理系统的上传校验失效了 | 它在上传口就卡住"包名与文件内技能名一致"，所以这条**正常情况下不可能报**。报了就是那道校验被绕过、被放宽，或两边的归一化规则不同（大小写、空格、Unicode），先查上传侧 |
+| 每个 skill 都多出 `folder_hierarchy` | 物化布局异常 | 物化时没套上 `skills/` 那层，见 materialize.py |
+| 任务报"不是一个可评测的 skill" | 多半是传了非 Skills 分类的包 | Commands / Agents / Hooks 里没有 `SKILL.md`。触发方应当只对 Skills 分类调用，找对接方查触发侧的过滤；不是用户的包坏了 |
 | 任务卡在 `queued` | worker 没运行 | `systemctl status skillprism-worker` |
 | 启动报"数据库结构尚未初始化" | 没跑迁移 | `alembic upgrade head`，见第五节 |
 | 连不上数据库 | 连接串、密码或 PG 服务 | `sudo -u skillprism psql "$SKILLPRISM_DATABASE_URL" -c 'select 1'` |
