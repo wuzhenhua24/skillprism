@@ -35,18 +35,46 @@ sudo apt update && sudo apt install -y curl ca-certificates
 不需要 `build-essential`：所有带 C 扩展的依赖（`yara-python`、`cffi`、
 `cryptography`）在 amd64/arm64 上都有 manylinux 预编译 wheel。
 
-安装 PostgreSQL。**生产从第一天就用 PG**，不走 SQLite——这样将来不存在
-把真实数据从 SQLite 迁到 PG 的问题（那个迁移有几个不好绕的坑：布尔与时间戳
-的类型表示、自增序列要重置等）。
+PostgreSQL。**生产从第一天就用 PG**，不走 SQLite——这样将来不存在把真实数据
+从 SQLite 迁到 PG 的问题（那个迁移有几个不好绕的坑：布尔与时间戳的类型表示、
+自增序列要重置等）。
+
+**已经有 PG 实例就跳过安装**，只需要拿到五个连接参数（地址、端口、库名、
+用户名、密码）并建好库和角色。版本没有下限之外的要求：本服务只用到
+`SKIP LOCKED`（PG 9.5+），测试夹具建删临时库时用到
+`DROP DATABASE ... WITH (FORCE)`（PG 13+）。驱动侧 `psycopg[binary]` 自带
+libpq，`.venv/bin/python -c "import psycopg; print(psycopg.pq.version())"`
+可以看到它的版本。
+
+这台机器上还没有 PG 时才装：
 
 ```bash
 sudo apt install -y postgresql
-sudo -u postgres createuser skillprism --pwprompt
+```
+
+Ubuntu 源里的版本：24.04 是 PG 16，22.04 是 PG 14。要更新的版本走 PGDG 官方源。
+
+建库和角色。下面这两条走的是 apt 包的布局（`postgres` 系统用户 + peer 认证
+的本地 socket）；**独立安装或远程实例未必是这个样子**，那就用你自己的管理
+账号连上去执行等价的 `CREATE ROLE` / `CREATE DATABASE`：
+
+```bash
+sudo -u postgres createuser skillprism --pwprompt --createdb
 sudo -u postgres createdb skillprism --owner skillprism
 ```
 
-Ubuntu 源里的版本：24.04 是 PG 16，22.04 是 PG 14。若有特定版本要求，走 PGDG
-官方源装。
+`--createdb` 不是给服务用的——服务只读写自己那个库，不建库。它是给
+**测试**用的：`tests/conftest.py` 每个用例会建一个随机命名的临时库、跑完即删，
+没有这个权限，第九节那趟 PG 测试第一条就会报权限不足。不想给生产账号这个
+权限的话，另建一个测试专用账号。
+
+连不上或不确定参数时，这几条能问出来：
+
+```bash
+psql "<你的连接串>" -c '\conninfo'          # 地址、端口、库名、用户名
+psql "<你的连接串>" -c 'show port'
+psql "<你的连接串>" -c 'select version()'
+```
 
 建一个专用账号和目录：
 
@@ -358,6 +386,9 @@ JSON 31 KB）。按 2000 个 skill、每个每月评测 4 次估算，一年约 
 设置 `SKILLPRISM_TEST_DATABASE_URL` 后改用 PostgreSQL。指向的库只用于建/删临时测试库，
 本身不会被改动；每个测试用一个随机命名的临时库，跑完即删，因此多人并跑
 不会互相污染。
+
+执行这一步的账号需要 **CREATEDB** 权限（夹具要建临时库），见第一节。
+连接串指向的库（下面用的是 `postgres`）本身不会被改动。
 
 在测试机上执行：
 
