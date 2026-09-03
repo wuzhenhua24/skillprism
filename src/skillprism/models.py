@@ -49,6 +49,11 @@ class EvaluationTask(Base):
     state: Mapped[str] = mapped_column(String(16), default="queued", index=True)
     attempts: Mapped[int] = mapped_column(Integer, default=0)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    #: 重试的最早可领取时间，为空表示立刻可领。退避必须落库而不是留在 worker
+    #: 内存里——worker 随时会重启，重启后内存里的退避状态就没了。
+    next_attempt_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

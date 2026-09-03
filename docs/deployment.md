@@ -163,6 +163,8 @@ SKILLPRISM_EVAL_TIMEOUT_SECONDS=600
 SKILLPRISM_REQUIRE_SCANNERS=true
 SKILLPRISM_POLL_INTERVAL_SECONDS=2
 SKILLPRISM_MAX_ATTEMPTS=3
+SKILLPRISM_RETRY_BACKOFF_SECONDS=30
+SKILLPRISM_RETRY_BACKOFF_MAX_SECONDS=300
 
 # 内容来源：管理系统的 zip 下载接口（待对方提供后填写）
 SKILLPRISM_CONTENT_URL_TEMPLATE=
@@ -174,6 +176,12 @@ EOF
 sudo chown root:skillprism /etc/skillprism/service.env
 sudo chmod 640 /etc/skillprism/service.env
 ```
+
+可重试的失败（下载的网络/5xx 故障、评测器退出码 3 或超时）按
+`RETRY_BACKOFF_SECONDS * 2^(n-1)` 退避，封顶 `RETRY_BACKOFF_MAX_SECONDS`，
+`MAX_ATTEMPTS` 次之后终结。默认值下三次尝试摊在约 90 秒里——**别把退避调成 0**：
+管理系统重启一次就不止几秒，没有退避的话三次尝试会在一个轮询周期内烧光，
+上游的短暂故障会变成任务的永久失败。
 
 `SKILLPRISM_LOCAL_SKILLS_ROOT` 只在 `SKILLPRISM_CONTENT_URL_TEMPLATE` 为空时生效，
 是第七节冒烟测试走的那条路。**必须显式给**：它的默认值是相对路径 `./var/skills`，
@@ -441,7 +449,8 @@ worker 写的报告，所以两者必须同机。要真正横向扩展需要先�
 | 启动报"数据库结构尚未初始化" | 没跑迁移 | `alembic upgrade head`，见第五节 |
 | 连不上数据库 | 连接串、密码或 PG 服务 | `sudo -u skillprism psql "$SKILLPRISM_DATABASE_URL" -c 'select 1'` |
 | 报告接口 404 但评测显示成功 | API 与 worker 不在同一文件系统 | 当前形态要求两者同机 |
-| 下载内容失败 | 区分两类：`SkillNotFoundError`（404 或归档解不出，不重试）与 `ContentFetchError`（5xx/网络，会重试） | 看 worker 日志里的具体异常 |
+| 下载内容失败 | 区分两类：`SkillNotFoundError`（404 或归档解不出，不重试，直接 `failed`）与 `ContentFetchError`（5xx/网络，退避重试至 `MAX_ATTEMPTS`） | 看 worker 日志里的具体异常；任务的 `error` 字段也会带上它 |
+| 任务在 `queued` 与失败之间来回，`attempts` 在涨 | 正在退避重试 | `GET /api/tasks/{task_id}` 看 `error` 和 `next_attempt_at`——前者是上次失败的原因，后者是下次重试时间 |
 
 ## 十一、上生产前必须补的
 

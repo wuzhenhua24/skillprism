@@ -102,6 +102,9 @@ def get_task(task_id: str, session: Session = Depends(get_db)) -> dict:
         "state": task.state,
         "attempts": task.attempts,
         "error": task.error,
+        # 非空即"正在退避、还没到重试时间"。queued 的任务光看 state 分不出
+        # 是在排队还是在重试，这个字段和 error 一起才说得清。
+        "next_attempt_at": task.next_attempt_at,
     }
 
 

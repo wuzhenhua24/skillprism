@@ -50,6 +50,13 @@ class Settings(BaseSettings):
 
     max_attempts: int = 3
 
+    #: 重试退避的基数：第 n 次尝试失败后等 base * 2**(n-1) 秒再领。
+    #: 不能是 0——没有退避的话 max_attempts 会在几秒内烧光，而管理系统
+    #: 重启一次就不止几秒，等于把上游的短暂故障变成任务的永久失败。
+    retry_backoff_seconds: float = 30.0
+    #: 退避上限。指数增长很快就会超出"只展示不拦截"这个定位的容忍度。
+    retry_backoff_max_seconds: float = 300.0
+
     # ---- Embedding shim（M2）----
     #: 火山方舟 OpenAI 兼容端点。shim 是唯一直接调它的组件。
     ark_base_url: str = "https://ark.cn-beijing.volces.com/api/coding/v3"
@@ -61,6 +68,13 @@ class Settings(BaseSettings):
     #: 传输层抖动重试次数。实测该端点偶发 TLS 握手失败。
     shim_retries: int = 3
     shim_timeout_seconds: float = 120.0
+
+    def backoff_for(self, attempts: int) -> float:
+        """第 ``attempts`` 次尝试失败后要等的秒数。"""
+        if self.retry_backoff_seconds <= 0:
+            return 0.0
+        delay = self.retry_backoff_seconds * 2 ** max(0, attempts - 1)
+        return min(delay, self.retry_backoff_max_seconds)
 
     def ensure_dirs(self) -> None:
         self.report_root.mkdir(parents=True, exist_ok=True)

@@ -10,9 +10,9 @@ queue 字段从第一天就存在：Tier 1 是纯静态分析的快队列，将�
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from skillprism.domain import TaskState, Tier
@@ -89,9 +89,19 @@ def claim_next(session: Session, queue: str = "fast") -> EvaluationTask | None:
 
     SQLite 下没有锁，因此**只能跑单个 worker 实例**，这是部署上的硬约束。
     """
+    now = datetime.now(tz=UTC)
     stmt = (
         select(EvaluationTask)
-        .where(EvaluationTask.state == str(TaskState.QUEUED), EvaluationTask.queue == queue)
+        .where(
+            EvaluationTask.state == str(TaskState.QUEUED),
+            EvaluationTask.queue == queue,
+            # 退避中的任务还没到点，跳过。SQLite 存的是不带时区偏移的字符串，
+            # 但写进去的一律是 _now() 的 UTC 值，两边格式一致，比较成立。
+            or_(
+                EvaluationTask.next_attempt_at.is_(None),
+                EvaluationTask.next_attempt_at <= now,
+            ),
+        )
         .order_by(EvaluationTask.created_at)
         .limit(1)
     )
@@ -103,8 +113,9 @@ def claim_next(session: Session, queue: str = "fast") -> EvaluationTask | None:
         return None
 
     task.state = str(TaskState.RUNNING)
-    task.started_at = datetime.now(tz=UTC)
+    task.started_at = now
     task.attempts += 1
+    task.next_attempt_at = None
     session.flush()
     return task
 
@@ -116,15 +127,30 @@ def finish(session: Session, task: EvaluationTask, *, error: str | None = None) 
     session.flush()
 
 
-def requeue(session: Session, task: EvaluationTask, *, error: str, max_attempts: int) -> bool:
+def requeue(
+    session: Session,
+    task: EvaluationTask,
+    *,
+    error: str,
+    max_attempts: int,
+    backoff_seconds: float = 0.0,
+) -> bool:
     """可重试的失败放回队列；超过次数上限则终结。
 
-    只有评测本身故障（退出码 3、超时）才走这里；skill 不合格不是失败。
+    走这里的是"值得再试一次"的故障：评测器退出码 3 或超时，以及内容下载
+    的网络/5xx 失败。skill 不合格不是失败，内容不存在也不是——那两种重试
+    多少次结论都一样。
+
+    ``error`` 无论重不重试都写在任务上。排队中的任务带着上一次的失败原因，
+    是运维唯一能看见"它在重试、为什么重试"的地方。
     """
     if task.attempts >= max_attempts:
         finish(session, task, error=f"{error}（已重试 {task.attempts} 次）")
         return False
     task.state = str(TaskState.QUEUED)
     task.error = error
+    task.next_attempt_at = (
+        datetime.now(tz=UTC) + timedelta(seconds=backoff_seconds) if backoff_seconds > 0 else None
+    )
     session.flush()
     return True

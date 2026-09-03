@@ -17,7 +17,12 @@ import time
 from skillprism import queue as task_queue
 from skillprism.adapter import to_dto
 from skillprism.config import Settings, get_settings
-from skillprism.content import SkillContentSource, SkillNotFoundError, build_content_source
+from skillprism.content import (
+    ContentFetchError,
+    SkillContentSource,
+    SkillNotFoundError,
+    build_content_source,
+)
 from skillprism.db import SCHEMA_NOT_READY_HINT, schema_is_ready, session_scope
 from skillprism.domain import EvaluationStatus
 from skillprism.materialize import (
@@ -52,7 +57,15 @@ def process_task(
     try:
         files = source.fetch(task.skill_id, task.skill_version)
     except SkillNotFoundError as exc:
+        # 内容不存在或归档解不出，再试多少次都一样。
         task_queue.finish(session, task, error=f"取不到内容：{exc}")
+        return EvaluationStatus.ERROR
+    except ContentFetchError as exc:
+        # 网络抖动或管理系统暂时不可用，值得重试——但必须走 requeue。
+        # 让它抛出去的话 session_scope 会回滚掉 claim_next 写的
+        # running/attempts，任务原样退回 queued：既不计次也不留错误信息，
+        # worker 于是每个轮询间隔重领一次，外部看到的只是"一直排队中"。
+        _requeue(session, task, settings, f"取不到内容：{exc}")
         return EvaluationStatus.ERROR
 
     # 内容可能在入队之后发生变化，以实际取到的内容为准。
@@ -121,7 +134,7 @@ def process_task(
         if dto.status is EvaluationStatus.ERROR:
             reason = dto.error or "评测失败"
             if outcome.retryable:
-                task_queue.requeue(session, task, error=reason, max_attempts=settings.max_attempts)
+                _requeue(session, task, settings, reason)
             else:
                 task_queue.finish(session, task, error=reason)
             return EvaluationStatus.ERROR
@@ -139,6 +152,27 @@ def process_task(
         cleanup(work_dir)
 
 
+def _requeue(session, task: EvaluationTask, settings: Settings, error: str) -> None:
+    """按退避策略把任务放回队列，超过上限则终结。"""
+    retrying = task_queue.requeue(
+        session,
+        task,
+        error=error,
+        max_attempts=settings.max_attempts,
+        backoff_seconds=settings.backoff_for(task.attempts),
+    )
+    if retrying:
+        logger.warning(
+            "任务 %s 第 %d 次失败，%.0f 秒后重试：%s",
+            task.id,
+            task.attempts,
+            settings.backoff_for(task.attempts),
+            error,
+        )
+    else:
+        logger.error("任务 %s 重试 %d 次后放弃：%s", task.id, task.attempts, error)
+
+
 def run_once(
     *,
     settings: Settings,
@@ -148,19 +182,46 @@ def run_once(
     queue: str = "fast",
 ) -> bool:
     """处理至多一个任务。返回是否真的处理了任务。"""
-    with session_scope() as session:
-        task = task_queue.claim_next(session, queue=queue)
-        if task is None:
-            return False
-        process_task(
-            session,
-            task,
-            settings=settings,
-            source=source,
-            storage=storage,
-            evaluator_version=evaluator_version,
-        )
+    task_id: str | None = None
+    try:
+        with session_scope() as session:
+            task = task_queue.claim_next(session, queue=queue)
+            if task is None:
+                return False
+            task_id = task.id
+            process_task(
+                session,
+                task,
+                settings=settings,
+                source=source,
+                storage=storage,
+                evaluator_version=evaluator_version,
+            )
+            return True
+    except Exception as exc:
+        # 预料之外的异常。事务已经被 session_scope 回滚，claim_next 写的
+        # running/attempts 一起没了，任务原样退回 queued——不补记的话它会被
+        # 每个轮询间隔重领一次，而任务表上看不出任何异常。
+        # 这是个兜底：具体的失败类型应当在 process_task 里分类处理。
+        if task_id is None:
+            raise
+        _record_crash(task_id, settings, exc)
         return True
+
+
+def _record_crash(task_id: str, settings: Settings, exc: BaseException) -> None:
+    """把预料之外的异常补记到任务上。另开事务——原来那个已经回滚了。"""
+    logger.exception("任务 %s 处理异常", task_id)
+    try:
+        with session_scope() as session:
+            task = session.get(EvaluationTask, task_id)
+            if task is None:
+                return
+            # attempts 跟着回滚一起丢了，补回来，否则重试上限永远够不着。
+            task.attempts += 1
+            _requeue(session, task, settings, f"处理异常：{type(exc).__name__}: {exc}")
+    except Exception:
+        logger.exception("任务 %s 的失败状态没能写进去", task_id)
 
 
 def main() -> int:
