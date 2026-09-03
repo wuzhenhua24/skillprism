@@ -4,7 +4,25 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+def parse_scanner_env(value: str) -> dict[str, str]:
+    """把 ``K=V,K=V`` 解析成字典。格式不对就抛，不做静默忽略。"""
+    pairs: dict[str, str] = {}
+    for item in value.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        key, sep, val = item.partition("=")
+        key = key.strip()
+        if not sep or not key:
+            raise ValueError(
+                f"SKILLPRISM_SCANNER_ENV 的每一项都要形如 K=V（逗号分隔），这一项不合法：{item!r}"
+            )
+        pairs[key] = val.strip()
+    return pairs
 
 
 class Settings(BaseSettings):
@@ -41,6 +59,14 @@ class Settings(BaseSettings):
 
     eval_timeout_seconds: int = 600
 
+    #: 额外传给评测子进程的环境变量，格式 ``K=V``，逗号分隔。
+    #:
+    #: 子进程默认只拿到 PATH/HOME（见 runner._subprocess_env），systemd 的
+    #: EnvironmentFile 注入的东西到不了扫描器那一层。这个字段是唯一的注入口，
+    #: 用于调扫描器的行为——例如出网受限的机器上给 semgrep 加超时上限。
+    #: 值在这里写明而不是从父进程继承，"不把公司凭据带进评测进程"这条才守得住。
+    scanner_env: str = ""
+
     #: 启动时自检外部扫描器，缺失则拒绝启动。
     #: 关掉它意味着接受产出 incomplete 结果，仅供本地开发。
     require_scanners: bool = True
@@ -68,6 +94,16 @@ class Settings(BaseSettings):
     #: 传输层抖动重试次数。实测该端点偶发 TLS 握手失败。
     shim_retries: int = 3
     shim_timeout_seconds: float = 120.0
+
+    @field_validator("scanner_env")
+    @classmethod
+    def _scanner_env_is_parseable(cls, value: str) -> str:
+        """启动时就校验格式。写错了要当场报错，不能到评测时才静默丢掉。"""
+        parse_scanner_env(value)
+        return value
+
+    def scanner_env_pairs(self) -> dict[str, str]:
+        return parse_scanner_env(self.scanner_env)
 
     def backoff_for(self, attempts: int) -> float:
         """第 ``attempts`` 次尝试失败后要等的秒数。"""

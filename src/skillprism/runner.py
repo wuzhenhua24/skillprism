@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import shutil
 import subprocess
@@ -29,9 +30,44 @@ from skillprism.domain import (
     RETRYABLE_EXIT_CODES,
 )
 
+logger = logging.getLogger(__name__)
+
+#: 评测子进程的扫描器默认环境。
+#:
+#: semgrep 每次 scan 会向 semgrep.dev 查最新版本、并按 metrics 设置回传数据。
+#: 对一个内网批量评测服务来说这两件事只有坏处：
+#:
+#: - 出网受限的机器上，这些请求会拖慢甚至挂住评测（DNS 解析不受 requests
+#:   的 timeout 约束，丢包环境下能卡很久）；
+#: - 把被扫代码的相关数据发到外部，本来就不该是默认行为。
+#:
+#: 所以在这里关掉，而不是让每个部署者自己去发现这个冷知识。
+#: 部署者仍可用 SKILLPRISM_SCANNER_ENV 覆盖这两个值。
+SCANNER_ENV_DEFAULTS = {
+    "SEMGREP_ENABLE_VERSION_CHECK": "0",
+    "SEMGREP_SEND_METRICS": "off",
+}
+
 
 class PreflightError(RuntimeError):
     """运行环境不满足评测前提。"""
+
+
+def _subprocess_env(settings: Settings) -> dict[str, str]:
+    """评测子进程的环境。
+
+    刻意不继承调用方环境：评测不需要任何公司密钥，少一条泄漏路径。
+    代价是 systemd 的 EnvironmentFile 也到不了扫描器那一层，所以扫描器
+    需要的开关必须从这里显式给——SCANNER_ENV_DEFAULTS 管住已知的坑，
+    SKILLPRISM_SCANNER_ENV 留给部署者补剩下的。
+    """
+    return {
+        "PATH": os.environ.get("PATH", ""),
+        "HOME": str(Path.home()),
+        **SCANNER_ENV_DEFAULTS,
+        # 放在最后：部署者显式写的值优先于我们的默认。
+        **settings.scanner_env_pairs(),
+    }
 
 
 @dataclass
@@ -86,11 +122,18 @@ def preflight(settings: Settings) -> PreflightReport:
             text=True,
             timeout=30,
             check=False,
+            # 与真正跑评测时同一套环境，否则自检验的不是将要执行的那个环境。
+            env=_subprocess_env(settings),
         )
         if proc.returncode == 0:
             report.version = proc.stdout.strip() or None
-    except (OSError, subprocess.TimeoutExpired):
-        pass
+    except subprocess.TimeoutExpired:
+        # 出网受限的机器上，扫描器的联网动作能把这里拖到超时。
+        # 版本取不到不阻塞启动，但必须留下日志——否则 /healthz 里
+        # 一个没来由的 version: null 无从查起。
+        logger.warning("skillevaluator --version 30 秒未返回，版本未知；机器出网是否受限？")
+    except OSError as exc:
+        logger.warning("skillevaluator --version 执行失败：%s", exc)
 
     report.missing_scanners = [name for name in REQUIRED_SCANNERS if shutil.which(name) is None]
     return report
@@ -175,8 +218,7 @@ def run_validate(settings: Settings, skill_dir: Path, out_dir: Path) -> RunOutco
             text=True,
             timeout=settings.eval_timeout_seconds,
             check=False,
-            # 不继承调用方环境中的凭据；评测不需要任何公司密钥。
-            env={"PATH": os.environ.get("PATH", ""), "HOME": str(Path.home())},
+            env=_subprocess_env(settings),
         )
     except subprocess.TimeoutExpired as exc:
         return RunOutcome(

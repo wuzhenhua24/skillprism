@@ -161,6 +161,8 @@ SKILLPRISM_POLICY_FILE=/opt/skillprism/profiles/internal.yaml
 SKILLPRISM_SKILLEVALUATOR_BIN=/var/lib/skillprism/.local/bin/skillevaluator
 SKILLPRISM_EVAL_TIMEOUT_SECONDS=600
 SKILLPRISM_REQUIRE_SCANNERS=true
+# 额外传给评测子进程的环境变量，K=V 逗号分隔。留空即可，见下文说明
+SKILLPRISM_SCANNER_ENV=
 SKILLPRISM_POLL_INTERVAL_SECONDS=2
 SKILLPRISM_MAX_ATTEMPTS=3
 SKILLPRISM_RETRY_BACKOFF_SECONDS=30
@@ -176,6 +178,16 @@ EOF
 sudo chown root:skillprism /etc/skillprism/service.env
 sudo chmod 640 /etc/skillprism/service.env
 ```
+
+**这个文件里的环境变量到不了扫描器那一层。** 评测跑在子进程里，为了不把
+公司凭据带进去，它只拿到 `PATH`、`HOME` 和一份写死的扫描器环境
+（`runner.SCANNER_ENV_DEFAULTS`）。要给 semgrep 之类加开关，只能写
+`SKILLPRISM_SCANNER_ENV`，例如 `SEMGREP_VERSION_CHECK_TIMEOUT=1`。
+格式写错会在启动时直接报错，不会静默丢掉。
+
+出网受限的机器不需要额外配置：semgrep 的版本检查与 metrics 上报已经默认关掉
+（`SEMGREP_ENABLE_VERSION_CHECK=0`、`SEMGREP_SEND_METRICS=off`）。这两件事
+对内网批量评测只有坏处——拖慢甚至挂住评测，还把被扫代码的相关数据发到外部。
 
 可重试的失败（下载的网络/5xx 故障、评测器退出码 3 或超时）按
 `RETRY_BACKOFF_SECONDS * 2^(n-1)` 退避，封顶 `RETRY_BACKOFF_MAX_SECONDS`，
@@ -445,6 +457,8 @@ worker 写的报告，所以两者必须同机。要真正横向扩展需要先�
 | 任务报"不是一个可评测的 skill" | 多半是传了非 Skills 分类的包 | Commands / Agents / Hooks 里没有 `SKILL.md`。触发方应当只对 Skills 分类调用，找对接方查触发侧的过滤；不是用户的包坏了 |
 | 任务 error，日志写"取不到内容：找不到 skill" | 走本地目录时 `SKILLPRISM_LOCAL_SKILLS_ROOT` 与实际目录不一致 | 该变量不设会默认成相对路径 `./var/skills`，即 `/opt/skillprism/var/skills`。按第五节显式配成绝对路径 |
 | 提交返回 422 `skill_name Field required` | 触发请求少了必填字段 | `skill_name` 是管理系统里登记的技能名，见第七节与 README 的接口说明 |
+| 评测长时间不返回、最终超时，机器出网受限 | 扫描器在联网（版本检查、metrics 上报） | 本服务已默认关掉 semgrep 的这两项。仍然卡就用 `SKILLPRISM_SCANNER_ENV` 加开关，**不要**去写 `~/.semgrep/settings.yml`——`disable_version_check` 不是 semgrep 认的键，写了也不生效 |
+| `/healthz` 的 `version` 是 `null`，但服务能起 | 取版本的子进程超时或失败 | 看 worker/api 日志里 `skillevaluator --version` 那条 warning |
 | 任务卡在 `queued` | worker 没运行 | `systemctl status skillprism-worker` |
 | 启动报"数据库结构尚未初始化" | 没跑迁移 | `alembic upgrade head`，见第五节 |
 | 连不上数据库 | 连接串、密码或 PG 服务 | `sudo -u skillprism psql "$SKILLPRISM_DATABASE_URL" -c 'select 1'` |
