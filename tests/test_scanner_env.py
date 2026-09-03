@@ -65,15 +65,51 @@ def test_scanner_env_parsing():
 
 
 @pytest.mark.skipif(shutil.which("semgrep") is None, reason="本机没装 semgrep")
-def test_env_var_names_match_installed_semgrep():
-    """变量名拼错就是白设，让 semgrep 自己确认这两个名字。
+def test_semgrep_still_reads_these_env_vars(tmp_path):
+    """让 semgrep 自己证明它认识这两个变量名。
 
-    ``--enable-version-check/--disable-version-check`` 绑的是
-    SEMGREP_ENABLE_VERSION_CHECK；名字一旦上游改了，这条会失败。
+    判据是"给非法值会不会被拒绝"：semgrep 会校验自己认识的环境变量，
+    不认识的直接忽略。所以真变量 + 非法值 => 非零退出，编造的变量名 +
+    同样的非法值 => 正常跑完。末尾那个控制组不是装饰，它保证这条断言
+    不会因为"随便设个变量 semgrep 都报错"而空过。
+
+    **不要改回去比对 --help 的输出。** 上一版就是那么写的，在开发机的
+    semgrep 1.175（OCaml/cmdliner 前端，会列出环境变量）上通过，到部署机的
+    1.176 上直接失败——那个前端根本不列环境变量。变量本身一直是好的，
+    测试盯错了东西：CLI 的排版不是上游承诺过的契约，行为才是。
+
+    变量名一旦被上游改掉，我们在 SCANNER_ENV_DEFAULTS 里设的开关会静默失效，
+    出网受限的机器上评测重新开始挂起。这条测试就是为了别让它静默。
     """
-    help_text = subprocess.run(
-        ["semgrep", "scan", "--help"], capture_output=True, text=True, timeout=120, check=False
-    ).stdout
+    target = tmp_path / "target"
+    target.mkdir()
+    rules = tmp_path / "rules.yaml"
+    rules.write_text(
+        "rules:\n"
+        "  - id: never-matches\n"
+        "    pattern: $NEVER_MATCHES_ANYTHING\n"
+        "    message: placeholder\n"
+        "    languages: [python]\n"
+        "    severity: INFO\n",
+        encoding="utf-8",
+    )
+
+    def run_with(var: str) -> int:
+        # 基础环境用我们自己那套，扫描期间不会有任何联网动作——
+        # 这条测试在出网受限的机器上也必须跑得动。
+        env = {**_subprocess_env(Settings()), var: "bogus~value"}
+        return subprocess.run(
+            ["semgrep", "scan", "--config", str(rules), str(target)],
+            capture_output=True,
+            text=True,
+            timeout=180,
+            env=env,
+            check=False,
+        ).returncode
 
     for name in SCANNER_ENV_DEFAULTS:
-        assert name in help_text, f"semgrep 不认识 {name}，检查拼写或上游是否改名"
+        assert run_with(name) != 0, f"semgrep 不再校验 {name}，八成是上游改名了"
+
+    assert run_with("SEMGREP_NOT_A_REAL_SETTING") == 0, (
+        "编造的变量名也让 semgrep 失败，说明上面那几条断言证明不了任何事"
+    )

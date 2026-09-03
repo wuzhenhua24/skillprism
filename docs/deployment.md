@@ -367,6 +367,23 @@ sudo systemctl restart skillprism-api skillprism-worker
 `test_security_scan_completes` 仍然通过；升级后存量 skill 的评分可能整体漂移，
 建议先跑一批做对比。
 
+这时候顺便跑一次 `test_severity_enum_matches_upstream`。它平时是跳过的：
+要 import skillevaluator 的 Python 包，而那个包按设计独立装在 uv tool 里、
+不进服务的 venv（上游有 litellm<1.89 这类硬 pin，共用迟早冲突）。也就是说
+这条检查平时在任何机器上都不会跑——升级恰好是它唯一有价值的时刻，因为
+上游的 Severity 取值漂移只可能在这时发生。用一个**一次性 venv**，别装进
+`/opt/skillprism/.venv`：
+
+```bash
+cd /opt/skillprism
+/var/lib/skillprism/.local/bin/uv venv --python 3.13 /tmp/contract-venv
+/var/lib/skillprism/.local/bin/uv pip install --python /tmp/contract-venv/bin/python -e ".[dev,contract]"
+/tmp/contract-venv/bin/python -m pytest tests/test_upstream_contract.py -v
+rm -rf /tmp/contract-venv
+```
+
+同一文件里其余 8 条用的是仓库内的报告 fixture，不需要装上游，平时就在跑。
+
 **备份**：PostgreSQL 库 `skillprism` 是全部结果数据，用 `pg_dump` 备份。
 `reports/` 可按 `content_hash` 重新生成，丢了不致命。
 
