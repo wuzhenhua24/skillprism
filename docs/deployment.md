@@ -421,7 +421,25 @@ JSON 31 KB）。按 2000 个 skill、每个每月评测 4 次估算，一年约 
 执行这一步的账号需要 **CREATEDB** 权限（夹具要建临时库），见第一节。
 连接串指向的库（下面用的是 `postgres`）本身不会被改动。
 
-在测试机上执行：
+测试依赖不在第四节装的 `.[pg]` 里，先补上（`dev` extra 只有 pytest 那几个包，
+不会动运行时依赖）：
+
+```bash
+cd /opt/skillprism
+sudo -u skillprism /var/lib/skillprism/.local/bin/uv pip install \
+  --python .venv/bin/python -e ".[dev,pg]"
+```
+
+先单跑这一条确认真的连上了 PG，它在退回 SQLite 时会失败：
+
+```bash
+cd /opt/skillprism
+sudo -u skillprism env \
+  SKILLPRISM_TEST_DATABASE_URL='postgresql+psycopg://skillprism:<密码>@127.0.0.1:5432/postgres' \
+  .venv/bin/python -m pytest tests/test_queue_concurrency.py -v
+```
+
+再跑全量：
 
 ```bash
 cd /opt/skillprism
@@ -429,6 +447,9 @@ sudo -u skillprism env \
   SKILLPRISM_TEST_DATABASE_URL='postgresql+psycopg://skillprism:<密码>@127.0.0.1:5432/postgres' \
   .venv/bin/python -m pytest -q
 ```
+
+连接串指向的 `postgres` 库只用来建/删临时库，本身不会被改动；生产库
+`skillprism` 全程不参与，测试不会碰到线上数据。
 
 关键是 `tests/test_queue_concurrency.py`：其中两条用例在 SQLite 上会跳过，
 只有在 PG 上才真正验证"两个 worker 不会抢到同一个任务"。它们跳过时会打印
