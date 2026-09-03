@@ -39,6 +39,20 @@ def _admin_engine(base_url: str):
     return create_engine(base_url, isolation_level="AUTOCOMMIT")
 
 
+def temp_db_url(base_url: str, name: str) -> str:
+    """把管理连接串改指到临时库。
+
+    必须 ``render_as_string(hide_password=False)``：``str(URL)`` 会把密码
+    掩码成 ``***``，而那是一个看起来完全正常的连接串，只在真正连接时报
+    "password authentication failed"——一路把人指向"密码配错了"，
+    而密码其实是对的。
+
+    建库/删库用的是原始 base 串，不受影响，所以症状只出现在用例里。
+    SQLite 分支没有密码，因此开发机上（默认 SQLite）永远碰不到这个坑。
+    """
+    return make_url(base_url).set(database=name).render_as_string(hide_password=False)
+
+
 @pytest.fixture
 def db_url(tmp_path):
     """本次测试可用的数据库地址。
@@ -60,7 +74,7 @@ def db_url(tmp_path):
         engine.dispose()
 
     try:
-        yield str(make_url(base).set(database=name))
+        yield temp_db_url(base, name)
     finally:
         engine = _admin_engine(base)
         try:
