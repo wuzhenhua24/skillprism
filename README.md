@@ -123,7 +123,8 @@ worker 另起一个进程：
 - `SCHEMA.name_consistency`（HIGH）比对目录名与 frontmatter 的 `name`
 - `SCHEMA.folder_hierarchy`（MEDIUM）要求 skill 位于 `skills/` 或 `team-skills/` 下
 
-所以物化目录名取 `skill_id` 的最后一段、外面套一层 `skills/`。
+所以物化目录名取触发方传来的 `skill_name`、外面套一层 `skills/`
+（`skill_name` 落库之前排下的存量任务没这个字段，回落到 `skill_id` 末段）。
 用固定名（例如 `skill/`）会让**每个** skill 都平白多出一条 HIGH 加一条 MEDIUM，
 全是我们的布局造成的误报。用真实标识名后，`name_consistency` 才回归本来的语义：
 “登记的 skill 标识与 frontmatter 声明不一致”。

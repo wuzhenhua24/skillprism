@@ -156,6 +156,7 @@ sudo tee /etc/skillprism/service.env > /dev/null <<'EOF'
 SKILLPRISM_DATABASE_URL=postgresql+psycopg://skillprism:<密码>@127.0.0.1:5432/skillprism
 SKILLPRISM_REPORT_ROOT=/var/lib/skillprism/reports
 SKILLPRISM_WORK_ROOT=/var/lib/skillprism/work
+SKILLPRISM_LOCAL_SKILLS_ROOT=/var/lib/skillprism/skills
 SKILLPRISM_POLICY_FILE=/opt/skillprism/profiles/internal.yaml
 SKILLPRISM_SKILLEVALUATOR_BIN=/var/lib/skillprism/.local/bin/skillevaluator
 SKILLPRISM_EVAL_TIMEOUT_SECONDS=600
@@ -173,6 +174,11 @@ EOF
 sudo chown root:skillprism /etc/skillprism/service.env
 sudo chmod 640 /etc/skillprism/service.env
 ```
+
+`SKILLPRISM_LOCAL_SKILLS_ROOT` 只在 `SKILLPRISM_CONTENT_URL_TEMPLATE` 为空时生效，
+是第七节冒烟测试走的那条路。**必须显式给**：它的默认值是相对路径 `./var/skills`，
+会跟着 unit 里的 `WorkingDirectory` 落到 `/opt/skillprism/var/skills`，而数据都在
+`/var/lib/skillprism` 下——不设它，第七节建的 demo 目录 worker 根本看不到。
 
 `SKILLPRISM_CONTENT_TOKEN` 是凭据，所以这个文件是 `0640 root:skillprism`——
 服务读得到，其他账号读不到。
@@ -286,7 +292,8 @@ curl -s http://127.0.0.1:8000/healthz | python3 -m json.tool
 worker 在 `SKILLPRISM_REQUIRE_SCANNERS=true` 下会**直接拒绝启动**——这是有意为之，
 带病运行会产出看起来合格、实际没扫过的结果。
 
-跑一次真实评测（内容来源接上之前，可以先用本地目录验证链路）：
+跑一次真实评测（内容来源接上之前，可以先用本地目录验证链路）。
+下面的目录必须与第五节的 `SKILLPRISM_LOCAL_SKILLS_ROOT` 一致：
 
 ```bash
 sudo -u skillprism mkdir -p /var/lib/skillprism/skills/demo
@@ -300,11 +307,15 @@ description: A deployment smoke test skill. Use when verifying the evaluation pi
 EOF
 
 curl -s -X POST http://127.0.0.1:8000/api/evaluations \
-  -H 'Content-Type: application/json' -d '{"skill_id":"demo"}'
+  -H 'Content-Type: application/json' \
+  -d '{"skill_id":"demo","skill_name":"demo","skill_version":"1.0.0"}'
 
 sleep 20
 curl -s http://127.0.0.1:8000/api/skills/demo/evaluation | python3 -m json.tool
 ```
+
+`skill_name` 必填，且要与 `SKILL.md` 里 frontmatter 的 `name` 一致——物化目录用它
+命名，对不上会多出一条 `SCHEMA.name_consistency`。
 
 `status` 只要不是 `error` 就说明链路通了。若为 `incomplete`，
 看 `evaluator.incomplete_scans` 里是谁。
@@ -424,6 +435,8 @@ worker 写的报告，所以两者必须同机。要真正横向扩展需要先�
 | 出现 `name_consistency` | 管理系统的上传校验失效了 | 它在上传口就卡住"包名与文件内技能名一致"，所以这条**正常情况下不可能报**。报了就是那道校验被绕过、被放宽，或两边的归一化规则不同（大小写、空格、Unicode），先查上传侧 |
 | 每个 skill 都多出 `folder_hierarchy` | 物化布局异常 | 物化时没套上 `skills/` 那层，见 materialize.py |
 | 任务报"不是一个可评测的 skill" | 多半是传了非 Skills 分类的包 | Commands / Agents / Hooks 里没有 `SKILL.md`。触发方应当只对 Skills 分类调用，找对接方查触发侧的过滤；不是用户的包坏了 |
+| 任务 error，日志写"取不到内容：找不到 skill" | 走本地目录时 `SKILLPRISM_LOCAL_SKILLS_ROOT` 与实际目录不一致 | 该变量不设会默认成相对路径 `./var/skills`，即 `/opt/skillprism/var/skills`。按第五节显式配成绝对路径 |
+| 提交返回 422 `skill_name Field required` | 触发请求少了必填字段 | `skill_name` 是管理系统里登记的技能名，见第七节与 README 的接口说明 |
 | 任务卡在 `queued` | worker 没运行 | `systemctl status skillprism-worker` |
 | 启动报"数据库结构尚未初始化" | 没跑迁移 | `alembic upgrade head`，见第五节 |
 | 连不上数据库 | 连接串、密码或 PG 服务 | `sudo -u skillprism psql "$SKILLPRISM_DATABASE_URL" -c 'select 1'` |
