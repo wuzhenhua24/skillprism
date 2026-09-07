@@ -377,7 +377,39 @@ skill 不存在"。错误文案已经把两种可能都写上了，排查时先�
 为一个不拦截的徽章现在上不划算；真需要"评完立刻亮徽章"时，
 再在触发 payload 里加可选的 `callback_url`。
 
+这条判断的前提是**触发方和展示方都是管理系统**：用户提交时触发，之后打开
+详情页时轮询，有一个"人来看"的时刻承接结果。GitLab 接入没有改变这个前提
+（只是内容改从仓库取），所以仍然不需要异步通知。哪天触发方变成 CI 或
+push webhook，就没有这个承接时刻了，那时才需要重新算这笔账。
+
 列表页会出现 N 次单查（50 个 skill 打 50 次），需要时补一个批量查询接口。
+
+**查结果必须带 `content_hash`。** 两个查询端点都接受它：
+
+```
+GET /api/skills/{skill_id}/evaluation?content_hash=<hash>
+GET /api/skills/{skill_id}/report?content_hash=<hash>
+```
+
+拿 hash 的路径：提交返回 `task_id` → 轮 `GET /api/tasks/{task_id}`，worker
+下载完内容就会把 `content_hash` 填上 → 管理系统把它和这次提交存在一起 →
+详情页用它查。
+
+**不带 hash 时退回"最近评完的那条"，这在 GitLab 接入下多半不是你要的。**
+zip 接入每次上传换一个资源 ID，一个 `skill_id` 基本只有一条结论，取最近的
+就是取那条；GitLab 下 `skill_id` 是仓库路径、长期不变，多个 ref 的结论堆在
+同一个 ID 下，取到的是最近评完的那个 ref——详情页展示 v1.0.0，拿回来的可能
+是 main 的分数。
+
+**为什么不是按 ref 查。** 结论的身份是 `(skill_id, content_hash)`，
+`skill_version` 只是标签、不参与去重，`save_result` 同 `(skill_id, content_hash)`
+覆盖写。所以 tag `v1.0.0` 和分支 `main` 指向同一个 commit 时只有一行，标签是
+后评的那个，按 ref 查会漏掉一份确实评过的内容。要按 ref 查得准得改结果表的
+身份键，那和"结论按内容复用、不看 skill_id"的整个缓存设计冲突。
+
+两个端点走同一条查找逻辑（`service.lookup_result`）。各写一遍的后果是"结论
+查准了、点开报告却是另一份"——补 `content_hash` 之前的 `/report` 就是这样，
+由 `test_report_follows_content_hash` 钉住。
 
 ### 解归档是我们的安全边界
 
@@ -492,5 +524,6 @@ SKILL_EVAL_EMBEDDING_API_KEY=<ARK_API_KEY>
 - **Tier 3**：需要 Docker/K8s 沙箱、agent 凭据、评测预算。`sandbox` 队列与 `tiers.tier3` 已预留。
 - **扫描器版本未纳入复用判据**：见上面「结论按内容复用」。
 - **批量查询结果**：列表页按 skill_id 逐个查会打 N 次，需要时补。
-- **结果回调**：当前只支持轮询，见上面「结果怎么回去」。
+- **结果回调**：当前只支持轮询。前提是触发方与展示方都是管理系统；触发方
+  改成 CI / push webhook 时需要重新评估，见上面「结果怎么回去」。
 - **鉴权**：API 尚无认证，接入前需补。

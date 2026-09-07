@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 from skillprism import queue as task_queue
 from skillprism.domain import Tier
 from skillprism.materialize import MaterializeError, safe_relative_path
+from skillprism.models import EvaluationResult
 from skillprism.repository import find_result, latest_result, result_to_dto
 from skillprism.schemas import EvaluationDTO, SubmitRequest, SubmitResponse
 
@@ -92,17 +93,36 @@ def submit(
     return SubmitResponse(task_id=task.id, skill_id=task.skill_id, state=task.state)
 
 
+def lookup_result(
+    session: Session,
+    skill_id: str,
+    *,
+    content_hash: str | None = None,
+) -> EvaluationResult | None:
+    """定位一条结论。给了 ``content_hash`` 就精确取，否则退回最近一条。
+
+    结论与结果页必须走**同一条**查找逻辑。两边各写一遍的后果是"结论查准了、
+    点开报告却是另一份"——补 content_hash 之前的 ``/report`` 就是这样。
+
+    没给 hash 时的"最近一条"在两种接入下含义不同：zip 接入每次上传换一个
+    资源 ID，一个 skill_id 基本只有一条结论，取最近的就是取那条；GitLab
+    接入下 skill_id 是仓库路径、长期不变，多个 ref 的结论堆在同一个 ID 下，
+    取到的是最近评完的那个 ref。要指定版本必须带 content_hash——
+    ``skill_version`` 只是标签，同一份内容被两个 ref 评过时会被后写的覆盖
+    （见 :func:`repository.save_result`），按它查会漏。
+    """
+    if content_hash:
+        return find_result(session, skill_id, content_hash)
+    return latest_result(session, skill_id)
+
+
 def get_evaluation(
     session: Session,
     skill_id: str,
     *,
     content_hash: str | None = None,
 ) -> EvaluationDTO | None:
-    row = (
-        find_result(session, skill_id, content_hash)
-        if content_hash
-        else latest_result(session, skill_id)
-    )
+    row = lookup_result(session, skill_id, content_hash=content_hash)
     if row is None:
         return None
     return result_to_dto(row)

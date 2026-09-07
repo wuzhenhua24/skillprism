@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -176,6 +178,98 @@ def test_tier2_is_explicitly_not_implemented(client):
 
 def test_evaluation_missing_is_404(client):
     assert client.get("/api/skills/2000705/evaluation").status_code == 404
+
+
+# ---- 结论与报告的定位 ----
+
+
+def _seed_two_versions(skill_id: str, report_root: Path):
+    """同一个 skill_id 下两个 ref 的结论。GitLab 接入下这是常态：
+    skill_id 是仓库路径、长期不变，不像 zip 接入每次上传换一个资源 ID。"""
+    import datetime as dt
+    import uuid
+
+    from skillprism.db import session_scope
+    from skillprism.models import EvaluationResult
+
+    rows = [
+        ("v1.0.0", "hash-v1", dt.datetime(2026, 9, 1), 90.0),
+        ("main", "hash-main", dt.datetime(2026, 9, 5), 40.0),
+    ]
+    with session_scope() as session:
+        for ref, content_hash, when, score in rows:
+            report = report_root / content_hash / "report.html"
+            report.parent.mkdir(parents=True, exist_ok=True)
+            report.write_text(f"<h1>{ref}</h1>", encoding="utf-8")
+            session.add(
+                EvaluationResult(
+                    id=str(uuid.uuid4()),
+                    skill_id=skill_id,
+                    skill_version=ref,
+                    content_hash=content_hash,
+                    status="passed",
+                    evaluated_at=when,
+                    score=score,
+                    severity_counts={},
+                    incomplete_scans=[],
+                    report_html_uri=f"file://{report}",
+                )
+            )
+
+
+def test_report_follows_content_hash(client, tmp_path):
+    """结论查准了、点开报告却是另一份——补 content_hash 之前 /report 就是这样。
+
+    两个端点必须走同一条查找逻辑，见 service.lookup_result。
+    """
+    skill_id = "group/repo:skills/log-triage"
+    _seed_two_versions(skill_id, tmp_path / "reports")
+
+    evaluation = client.get(
+        f"/api/skills/{skill_id}/evaluation", params={"content_hash": "hash-v1"}
+    ).json()
+    report = client.get(f"/api/skills/{skill_id}/report", params={"content_hash": "hash-v1"})
+
+    assert evaluation["skill_version"] == "v1.0.0"
+    assert report.status_code == 200
+    assert "v1.0.0" in report.text
+
+
+def test_report_without_hash_still_returns_latest(client, tmp_path):
+    """不带 hash 的老用法不变：取最近评完的那条。"""
+    skill_id = "group/repo:skills/log-triage"
+    _seed_two_versions(skill_id, tmp_path / "reports")
+
+    report = client.get(f"/api/skills/{skill_id}/report")
+    assert report.status_code == 200
+    assert "main" in report.text
+
+
+def test_unknown_hash_is_distinguished_from_never_evaluated(client, tmp_path):
+    """带了 hash 却查不到，与"这个 skill 从没评过"是两回事，别都往"没触发"上查。"""
+    skill_id = "group/repo:skills/log-triage"
+    _seed_two_versions(skill_id, tmp_path / "reports")
+
+    missing = client.get(
+        f"/api/skills/{skill_id}/evaluation", params={"content_hash": "hash-nope"}
+    )
+    never = client.get("/api/skills/group/other/evaluation")
+
+    assert missing.status_code == never.status_code == 404
+    assert "hash-nope" in missing.json()["detail"]
+    assert "尚无评测结果" in never.json()["detail"]
+
+
+def test_gitlab_style_skill_id_routes_correctly(client, tmp_path):
+    """skill_id 含 `:` 和 `/`，两种写法都要能路由到同一条结论。"""
+    skill_id = "group/repo:skills/log-triage"
+    _seed_two_versions(skill_id, tmp_path / "reports")
+
+    plain = client.get(f"/api/skills/{skill_id}/evaluation")
+    encoded = client.get(f"/api/skills/{skill_id.replace('/', '%2F')}/evaluation")
+
+    assert plain.status_code == encoded.status_code == 200
+    assert plain.json()["skill_version"] == encoded.json()["skill_version"] == "main"
 
 
 def test_healthz_reports_scanner_state(client):

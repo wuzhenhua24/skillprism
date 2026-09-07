@@ -16,7 +16,6 @@ from skillprism.db import SCHEMA_NOT_READY_HINT, get_session_factory, schema_is_
 from skillprism.embedding_shim import router as embedding_shim_router
 from skillprism.materialize import MaterializeError, UnsafePathError
 from skillprism.models import EvaluationTask
-from skillprism.repository import latest_result
 from skillprism.runner import preflight
 from skillprism.schemas import EvaluationDTO, SubmitRequest, SubmitResponse
 
@@ -112,6 +111,17 @@ def get_task(task_id: str, session: Session = Depends(get_db)) -> dict:
     }
 
 
+def _no_result_detail(content_hash: str | None) -> str:
+    """带了 content_hash 却查不到，与"这个 skill 从没评过"是两回事。
+
+    前者多半是调用方把 hash 记串了或内容还没评完，后者才该去看有没有触发。
+    文案分开，免得对接时两种情况都往"没触发"上查。
+    """
+    if content_hash:
+        return f"该 skill 没有 content_hash={content_hash} 的评测结果"
+    return "该 skill 尚无评测结果"
+
+
 @app.get("/api/skills/{skill_id:path}/evaluation", response_model=EvaluationDTO)
 def get_evaluation(
     skill_id: str,
@@ -120,19 +130,27 @@ def get_evaluation(
 ) -> EvaluationDTO:
     dto = service.get_evaluation(session, skill_id, content_hash=content_hash)
     if dto is None:
-        raise HTTPException(status_code=404, detail="该 skill 尚无评测结果")
+        raise HTTPException(status_code=404, detail=_no_result_detail(content_hash))
     return dto
 
 
 @app.get("/api/skills/{skill_id:path}/report")
-def get_report(skill_id: str, session: Session = Depends(get_db)) -> FileResponse:
+def get_report(
+    skill_id: str,
+    content_hash: str | None = None,
+    session: Session = Depends(get_db),
+) -> FileResponse:
     """回传 SkillEvaluator 生成的 HTML 报告。
 
     这是自生成 HTML，管理系统应以沙箱化 iframe 或独立页面承载，
     不要内联进自身 DOM。
+
+    ``content_hash`` 与 ``/evaluation`` 同义，两边必须一起带：只在一边带，
+    拿到的结论和报告可能来自不同版本。
     """
-    row = latest_result(session, skill_id)
+    row = service.lookup_result(session, skill_id, content_hash=content_hash)
     path = service.report_path(row.report_html_uri) if row else None
     if path is None:
-        raise HTTPException(status_code=404, detail="报告不存在")
+        detail = "报告不存在" if row else _no_result_detail(content_hash)
+        raise HTTPException(status_code=404, detail=detail)
     return FileResponse(path, media_type="text/html")
