@@ -22,13 +22,18 @@ from __future__ import annotations
 import io
 import stat
 import zipfile
+from collections.abc import Callable
 
 from skillprism.materialize import (
+    MAX_BUNDLE_FILES,
+    MAX_BUNDLE_MEMBERS,
+    MAX_BUNDLE_TOTAL_BYTES,
     MAX_FILE_BYTES,
     MAX_FILES,
     MAX_TOTAL_BYTES,
     SKILL_MANIFEST,
     MaterializeError,
+    SkillBundle,
     SkillFile,
     UnsafePathError,
     safe_relative_path,
@@ -142,6 +147,121 @@ def read_skill_zip(data: bytes, *, subdir: str | None = None) -> list[SkillFile]
     的结果比评测失败更有害，因为它看起来是有效的。
     """
     subdir = subdir.strip("/") if subdir else None
+
+    def resolve(paths: list[str]) -> str:
+        if subdir:
+            return _prefix_for_subdir(paths, subdir)
+        root = _strip_common_root(paths)
+        return f"{root}/" if root else ""
+
+    def require_manifest(paths: list[str]) -> None:
+        if SKILL_MANIFEST not in paths:
+            # 措辞要和"包损坏"区分开：内容下下来了、也解开了，只是它不是
+            # 一个 skill。管理系统还托管 Commands / Agents / Hooks 等分类，
+            # 那些包里本来就没有 SKILL.md，报"归档无法解出"会把人带偏。
+            where = f"{subdir}/ 下" if subdir else "根目录"
+            raise ArchiveError(f"归档{where}缺少 {SKILL_MANIFEST}，不是一个可评测的 skill")
+
+    return _extract(
+        data,
+        max_files=MAX_FILES,
+        max_total_bytes=MAX_TOTAL_BYTES,
+        resolve_prefix=resolve,
+        validate_layout=require_manifest,
+    )
+
+
+def read_skill_bundle(data: bytes, *, subdir: str | None = None) -> SkillBundle:
+    """把一组耦合 skill 的 zip 解成一个 :class:`SkillBundle`。
+
+    与 :func:`read_skill_zip` 走同一条安全流水线（符号链接、解压炸弹、
+    zip slip、重复条目、体积上限），只是布局判据不同：这里要求根上**没有**
+    ``SKILL.md``、而有若干个直接含 ``SKILL.md`` 的一级子目录——正是
+    SkillEvaluator 进 catalog 模式的条件。
+
+    根上有 ``SKILL.md`` 就明确报错而不是降级成单 skill：调用方声明了这是
+    一组，内容却是一个，这种不一致要当场说出来，不能替它改判。
+    """
+    subdir = subdir.strip("/") if subdir else None
+
+    def resolve(paths: list[str]) -> str:
+        if subdir:
+            return _prefix_for_subdir(paths, subdir)
+        # 先试不剥。条目已经形如 ``<成员>/SKILL.md`` 时就不该动——只有一个
+        # 成员时，顶层目录名和成员名是同一个，剥掉就把 bundle 误读成单 skill。
+        if _bundle_members(paths):
+            return ""
+        root = _single_top_level(paths)
+        if root is not None:
+            stripped = [p[len(root) + 1 :] for p in paths]
+            if _bundle_members(stripped):
+                return f"{root}/"
+            _reject_if_single_skill(stripped)
+        _reject_if_single_skill(paths)
+        raise ArchiveError(_NO_MEMBERS)
+
+    def require_members(paths: list[str]) -> None:
+        # subdir 路径上前缀是调用方给的，剥完才知道底下是一个还是一组。
+        _reject_if_single_skill(paths)
+        members = _bundle_members(paths)
+        if not members:
+            raise ArchiveError(_NO_MEMBERS)
+        if len(members) > MAX_BUNDLE_MEMBERS:
+            raise ArchiveError(f"成员数超限：{len(members)} > {MAX_BUNDLE_MEMBERS}")
+
+    files = _extract(
+        data,
+        max_files=MAX_BUNDLE_FILES,
+        max_total_bytes=MAX_BUNDLE_TOTAL_BYTES,
+        resolve_prefix=resolve,
+        validate_layout=require_members,
+    )
+    return SkillBundle(files=files, members=_bundle_members([f.path for f in files]))
+
+
+#: 内容不是一组 skill 时的两条文案。分开写是因为处理方式不同：一个要调用方
+#: 改提交方式，一个要它去查仓库布局。
+_NO_MEMBERS = f"归档里没有任何直接含 {SKILL_MANIFEST} 的一级子目录，不是一组可评测的 skill"
+_IS_SINGLE_SKILL = (
+    f"归档根目录就有 {SKILL_MANIFEST}：这是单个 skill，不是一组。"
+    "按单 skill 提交，或把 skill_id 指向包含多个 skill 的父目录"
+)
+
+
+def _reject_if_single_skill(paths: list[str]) -> None:
+    """根上有 SKILL.md 就是单个 skill，报专门的文案而不是笼统的"找不到成员"。"""
+    if SKILL_MANIFEST in paths:
+        raise ArchiveError(_IS_SINGLE_SKILL)
+
+
+def _bundle_members(paths: list[str]) -> list[str]:
+    """根下直接含 ``SKILL.md`` 的一级子目录名，排序后返回。
+
+    只认一级：SkillEvaluator 的 catalog 模式 glob 的就是 ``*/SKILL.md``，
+    埋得更深的目录它不会当成 skill，这里跟着它，不自作主张多认一层。
+    """
+    return sorted(
+        {
+            path[: -(len(SKILL_MANIFEST) + 1)]
+            for path in paths
+            if path.endswith(f"/{SKILL_MANIFEST}") and path.count("/") == 1
+        }
+    )
+
+
+def _extract(
+    data: bytes,
+    *,
+    max_files: int,
+    max_total_bytes: int,
+    resolve_prefix: Callable[[list[str]], str],
+    validate_layout: Callable[[list[str]], None],
+) -> list[SkillFile]:
+    """解归档的共享核心：所有防线都在这里，布局判据由调用方给。
+
+    单 skill 与 bundle 只在"什么样的布局算合法"上不同，安全部分必须共用
+    一份实现——各写一遍的话，将来加一道防线只会加到其中一边。
+    """
     try:
         archive = zipfile.ZipFile(io.BytesIO(data))
     except zipfile.BadZipFile as exc:
@@ -162,8 +282,8 @@ def read_skill_zip(data: bytes, *, subdir: str | None = None) -> list[SkillFile]
 
         if not entries:
             raise ArchiveError("归档为空")
-        if len(entries) > MAX_FILES:
-            raise ArchiveError(f"归档条目数超限：{len(entries)} > {MAX_FILES}")
+        if len(entries) > max_files:
+            raise ArchiveError(f"归档条目数超限：{len(entries)} > {max_files}")
 
         # 先按声明值快速预筛。声明值不可信，但用来挡住明显过大的归档很便宜。
         declared_total = 0
@@ -171,8 +291,8 @@ def read_skill_zip(data: bytes, *, subdir: str | None = None) -> list[SkillFile]
             if info.file_size > MAX_FILE_BYTES:
                 raise ArchiveError(f"条目声明大小超限：{info.filename!r} 为 {info.file_size} 字节")
             declared_total += info.file_size
-        if declared_total > MAX_TOTAL_BYTES:
-            raise ArchiveError(f"归档声明总大小超限：{declared_total} > {MAX_TOTAL_BYTES}")
+        if declared_total > max_total_bytes:
+            raise ArchiveError(f"归档声明总大小超限：{declared_total} > {max_total_bytes}")
 
         # 路径校验放在读取内容之前——不安全的归档不该被读一个字节。
         raw_paths: list[str] = []
@@ -182,11 +302,7 @@ def read_skill_zip(data: bytes, *, subdir: str | None = None) -> list[SkillFile]
             except UnsafePathError as exc:
                 raise ArchiveError(f"归档含不安全路径：{exc}") from exc
 
-        if subdir:
-            prefix = _prefix_for_subdir(raw_paths, subdir)
-        else:
-            common_root = _strip_common_root(raw_paths)
-            prefix = f"{common_root}/" if common_root else ""
+        prefix = resolve_prefix(raw_paths)
         paths = [p[len(prefix) :] for p in raw_paths]
 
         seen: set[str] = set()
@@ -195,12 +311,7 @@ def read_skill_zip(data: bytes, *, subdir: str | None = None) -> list[SkillFile]
                 raise ArchiveError(f"归档含重复条目：{path}")
             seen.add(path)
 
-        if SKILL_MANIFEST not in seen:
-            # 措辞要和"包损坏"区分开：内容下下来了、也解开了，只是它不是
-            # 一个 skill。管理系统还托管 Commands / Agents / Hooks 等分类，
-            # 那些包里本来就没有 SKILL.md，报"归档无法解出"会把人带偏。
-            where = f"{subdir}/ 下" if subdir else "根目录"
-            raise ArchiveError(f"归档{where}缺少 {SKILL_MANIFEST}，不是一个可评测的 skill")
+        validate_layout(paths)
 
         files: list[SkillFile] = []
         actual_total = 0
@@ -225,8 +336,8 @@ def read_skill_zip(data: bytes, *, subdir: str | None = None) -> list[SkillFile]
                 raise ArchiveError(f"条目压缩比异常（疑似解压炸弹）：{path} 约 {ratio}:1")
 
             actual_total += len(blob)
-            if actual_total > MAX_TOTAL_BYTES:
-                raise ArchiveError(f"归档实际总大小超限：> {MAX_TOTAL_BYTES} 字节")
+            if actual_total > max_total_bytes:
+                raise ArchiveError(f"归档实际总大小超限：> {max_total_bytes} 字节")
 
             files.append(SkillFile(path=path, data=blob))
 

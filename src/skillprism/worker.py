@@ -27,14 +27,22 @@ from skillprism.db import SCHEMA_NOT_READY_HINT, schema_is_ready, session_scope
 from skillprism.domain import EvaluationStatus
 from skillprism.materialize import (
     MaterializeError,
+    SkillFile,
     UnsafePathError,
     cleanup,
     compute_content_hash,
     materialize,
+    materialize_bundle,
 )
 from skillprism.models import EvaluationTask
 from skillprism.repository import clone_result, find_reusable_result, save_result
-from skillprism.runner import PreflightError, policy_file_hash, require_ready, run_validate
+from skillprism.runner import (
+    PreflightError,
+    policy_file_hash,
+    require_ready,
+    run_catalog,
+    run_validate,
+)
 from skillprism.storage import LocalReportStorage, ReportStorage
 
 logger = logging.getLogger(__name__)
@@ -53,6 +61,20 @@ def process_task(
     work_dir = settings.work_root / task.id
     skill_dir = work_dir / "skill"
     out_dir = work_dir / "reports"
+
+    if task.bundle:
+        try:
+            return _process_bundle(
+                session,
+                task,
+                settings=settings,
+                source=source,
+                storage=storage,
+                evaluator_version=evaluator_version,
+                work_dir=work_dir,
+            )
+        finally:
+            cleanup(work_dir)
 
     try:
         files = source.fetch(task.skill_id, task.skill_version)
@@ -150,6 +172,180 @@ def process_task(
         return dto.status
     finally:
         cleanup(work_dir)
+
+
+def _member_skill_id(bundle_skill_id: str, member: str) -> str:
+    """一个成员对外的 skill_id。
+
+    ``group/repo:skills`` + ``code-review`` → ``group/repo:skills/code-review``，
+    正是这个 skill 单独提交时会用的那个 ID。管理系统因此不需要第二套查询
+    方式：查一个成员的结论和查任何别的 skill 完全一样。
+    """
+    return f"{bundle_skill_id.rstrip('/')}/{member}"
+
+
+def _process_bundle(
+    session,
+    task: EvaluationTask,
+    *,
+    settings: Settings,
+    source: SkillContentSource,
+    storage: ReportStorage,
+    evaluator_version: str | None,
+    work_dir,
+) -> EvaluationStatus:
+    """评一组耦合 skill：整套一起物化，跑一次 catalog，产出多条结果。
+
+    整套一起物化是这件事的全部意义。单独物化一个成员来评，它指向兄弟 skill
+    的相对链接全部变成死链——那是我们的物化方式造成的误报，不是 skill 的
+    问题，而且耦合越紧的 skill 分数越难看。
+
+    返回的是**整体**状态：任一成员出错即 ERROR，全部通过才算通过。单个成员
+    的结论各自落库，查询按成员的 skill_id 取。
+    """
+    skill_dir = work_dir / "skill"
+    out_dir = work_dir / "reports"
+
+    try:
+        bundle = source.fetch_bundle(task.skill_id, task.skill_version)
+    except SkillNotFoundError as exc:
+        task_queue.finish(session, task, error=f"取不到内容：{exc}")
+        return EvaluationStatus.ERROR
+    except ContentFetchError as exc:
+        _requeue(session, task, settings, f"取不到内容：{exc}")
+        return EvaluationStatus.ERROR
+
+    # 整套的指纹。它同时是任务的 content_hash（任务评的就是这一整套）和每个
+    # 成员结论的 context_hash（成员的结论取决于它所在的这一套）。
+    context_hash = compute_content_hash(bundle.files)
+    task.content_hash = context_hash
+    policy_hash = policy_file_hash(settings)
+
+    # 成员自身的内容指纹。路径要相对成员目录，否则同样的 skill 换个位置
+    # 就算成不同内容，缓存永远不命中。
+    member_files: dict[str, list] = {member: [] for member in bundle.members}
+    for item in bundle.files:
+        head, sep, rest = item.path.partition("/")
+        if sep and head in member_files:
+            member_files[head].append(SkillFile(path=rest, data=item.data))
+    member_hashes = {m: compute_content_hash(files) for m, files in member_files.items()}
+
+    # 逐个成员查缓存。全中就不用跑评测器——一套里只改了一个 skill 是常态，
+    # 其余成员的 context_hash 也变了（整套指纹变了），所以这里通常不会全中；
+    # 真正省下的是"同一个 commit 被重复触发"的情况。
+    reusable = {}
+    if not task.force:
+        for member, member_hash in member_hashes.items():
+            row = find_reusable_result(
+                session,
+                member_hash,
+                evaluator_version=evaluator_version,
+                policy_file_hash=policy_hash,
+                context_hash=context_hash,
+            )
+            if row is not None:
+                reusable[member] = row
+
+    if len(reusable) == len(bundle.members) and bundle.members:
+        for member, row in reusable.items():
+            member_id = _member_skill_id(task.skill_id, member)
+            if row.skill_id != member_id:
+                clone_result(session, row, skill_id=member_id, skill_version=task.skill_version)
+        task_queue.finish(session, task)
+        return _worst_status(EvaluationStatus(row.status) for row in reusable.values())
+
+    try:
+        catalog_root = materialize_bundle(bundle, skill_dir)
+    except (UnsafePathError, MaterializeError) as exc:
+        task_queue.finish(session, task, error=f"物化失败：{exc}")
+        return EvaluationStatus.ERROR
+
+    outcome = run_catalog(settings, catalog_root, out_dir, bundle.members)
+    if outcome.failure is not None:
+        # 进程层面就没跑起来，一个成员的结论都没有。
+        if outcome.retryable:
+            _requeue(session, task, settings, outcome.failure)
+        else:
+            task_queue.finish(session, task, error=outcome.failure)
+        return EvaluationStatus.ERROR
+
+    statuses: list[EvaluationStatus] = []
+    errors: list[str] = []
+    for member in bundle.members:
+        member_outcome = outcome.members[member]
+        member_id = _member_skill_id(task.skill_id, member)
+        dto = to_dto(
+            skill_id=member_id,
+            skill_version=task.skill_version,
+            content_hash=member_hashes[member],
+            context_hash=context_hash,
+            outcome=member_outcome,
+            evaluator_version=evaluator_version,
+            skill_root=catalog_root / member,
+        )
+
+        if dto.status is EvaluationStatus.ERROR:
+            # 单个成员没被判定就不写结果——写进去界面会显示一个并不存在的
+            # 结论。其余成员照常落库：一个成员的报告坏了，不该把另外几个
+            # 已经评出来的结论一起丢掉。
+            errors.append(f"{member}：{dto.error or '评测失败'}")
+            statuses.append(EvaluationStatus.ERROR)
+            continue
+
+        json_uri = html_uri = None
+        if member_outcome.report_json_path is not None:
+            json_uri = storage.put(
+                dto.content_hash,
+                "report.json",
+                member_outcome.report_json_path,
+                context_hash=context_hash,
+            )
+        if member_outcome.report_html_path is not None:
+            html_uri = storage.put(
+                dto.content_hash,
+                "report.html",
+                member_outcome.report_html_path,
+                context_hash=context_hash,
+            )
+        dto.report_url = html_uri
+
+        save_result(
+            session,
+            dto,
+            report_json_uri=json_uri,
+            report_html_uri=html_uri,
+            policy_file_hash=policy_hash,
+        )
+        statuses.append(dto.status)
+
+    if errors:
+        reason = "；".join(errors)
+        if outcome.retryable:
+            _requeue(session, task, settings, reason)
+        else:
+            task_queue.finish(session, task, error=reason)
+        return EvaluationStatus.ERROR
+
+    task_queue.finish(session, task)
+    return _worst_status(statuses)
+
+
+def _worst_status(statuses) -> EvaluationStatus:
+    """一组成员的整体状态：只要有一个不通过，整套就不通过。
+
+    刻意不做加权或多数决——"这套工作流能不能用"取决于最弱的那一环。
+    """
+    order = [
+        EvaluationStatus.ERROR,
+        EvaluationStatus.FAILED,
+        EvaluationStatus.INCOMPLETE,
+        EvaluationStatus.PASSED,
+    ]
+    seen = set(statuses)
+    for status in order:
+        if status in seen:
+            return status
+    return EvaluationStatus.ERROR
 
 
 def _requeue(session, task: EvaluationTask, settings: Settings, error: str) -> None:

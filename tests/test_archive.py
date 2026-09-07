@@ -11,7 +11,7 @@ import zipfile
 
 import pytest
 
-from skillprism.archive import ArchiveError, read_skill_zip
+from skillprism.archive import ArchiveError, read_skill_bundle, read_skill_zip
 from skillprism.materialize import MAX_FILE_BYTES, MAX_FILES
 
 MANIFEST = b"---\nname: demo\ndescription: A demo skill.\n---\n\n# Demo\n"
@@ -234,3 +234,89 @@ def test_subdir_still_rejects_symlinks():
     )
     with pytest.raises(ArchiveError, match="符号链接"):
         read_skill_zip(data, subdir="skills/foo")
+
+
+# ---- 一组耦合 skill（bundle）----
+
+
+def test_reads_bundle_with_shared_files():
+    """成员之外的共享文件必须保留——耦合的典型形态就是几个 skill 共引一份约定。"""
+    data = build_zip(
+        [
+            ("code-review/SKILL.md", MANIFEST),
+            ("test-gen/SKILL.md", MANIFEST),
+            ("shared/api.md", b"# api"),
+            ("README.md", b"# bundle"),
+        ]
+    )
+    bundle = read_skill_bundle(data)
+    assert bundle.members == ["code-review", "test-gen"]
+    assert {f.path for f in bundle.files} == {
+        "code-review/SKILL.md",
+        "test-gen/SKILL.md",
+        "shared/api.md",
+        "README.md",
+    }
+
+
+def test_bundle_strips_git_archive_prefix():
+    data = build_zip(
+        [
+            ("repo-main-abc123/skills/a/SKILL.md", MANIFEST),
+            ("repo-main-abc123/skills/b/SKILL.md", MANIFEST),
+        ]
+    )
+    bundle = read_skill_bundle(data, subdir="skills")
+    assert bundle.members == ["a", "b"]
+    assert {f.path for f in bundle.files} == {"a/SKILL.md", "b/SKILL.md"}
+
+
+def test_single_member_bundle_is_not_flattened():
+    """只有一个成员时顶层目录名与成员名重合，剥掉就把一组误读成单个。"""
+    data = build_zip([("code-review/SKILL.md", MANIFEST), ("code-review/ref.md", b"r")])
+    bundle = read_skill_bundle(data)
+    assert bundle.members == ["code-review"]
+    assert {f.path for f in bundle.files} == {"code-review/SKILL.md", "code-review/ref.md"}
+
+
+def test_bundle_rejects_single_skill_archive():
+    """声明了一组、内容却是一个，要当场说出来，不替调用方改判。"""
+    data = build_zip([("SKILL.md", MANIFEST), ("ref.md", b"r")])
+    with pytest.raises(ArchiveError, match="这是单个 skill"):
+        read_skill_bundle(data)
+
+
+def test_bundle_requires_at_least_one_member():
+    data = build_zip([("docs/a.md", b"a"), ("README.md", b"b")])
+    with pytest.raises(ArchiveError, match="不是一组可评测的 skill"):
+        read_skill_bundle(data)
+
+
+def test_bundle_ignores_manifests_nested_deeper():
+    """catalog 模式 glob 的是 */SKILL.md，埋更深的不算成员，这里跟着它。"""
+    data = build_zip([("a/SKILL.md", MANIFEST), ("b/nested/SKILL.md", MANIFEST)])
+    bundle = read_skill_bundle(data)
+    assert bundle.members == ["a"]
+
+
+def test_bundle_keeps_every_archive_defence():
+    """bundle 与单 skill 共用同一条安全流水线，不是另开一条。"""
+    data = build_zip(
+        [("a/SKILL.md", MANIFEST), ("a/link", b"/etc/passwd")],
+        symlinks=("a/link",),
+    )
+    with pytest.raises(ArchiveError, match="符号链接"):
+        read_skill_bundle(data)
+
+    with pytest.raises(ArchiveError, match="不安全路径"):
+        read_skill_bundle(build_zip([("a/SKILL.md", MANIFEST), ("../escape.md", b"x")]))
+
+
+def test_bundle_rejects_too_many_members():
+    from skillprism.materialize import MAX_BUNDLE_MEMBERS
+
+    data = build_zip(
+        [(f"skill-{i}/SKILL.md", MANIFEST) for i in range(MAX_BUNDLE_MEMBERS + 1)]
+    )
+    with pytest.raises(ArchiveError, match="成员数超限"):
+        read_skill_bundle(data)

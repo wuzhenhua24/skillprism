@@ -74,6 +74,9 @@ def submit(
             # 是个恒等操作；留着是为了两条路径只有一份身份更新逻辑。
             existing.skill_name = request.skill_name
             existing.skill_version = request.skill_version
+            # bundle 意图也要跟上：折叠进去的那条还没下载内容，用旧意图跑
+            # 会按错误的形态解归档，报一个和本次触发无关的错。
+            existing.bundle = request.bundle
             session.flush()
             return SubmitResponse(
                 task_id=existing.id,
@@ -89,6 +92,7 @@ def submit(
         skill_version=request.skill_version,
         tier=request.tier,
         force=request.force,
+        bundle=request.bundle,
     )
     return SubmitResponse(task_id=task.id, skill_id=task.skill_id, state=task.state)
 

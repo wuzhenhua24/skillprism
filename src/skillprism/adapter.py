@@ -126,6 +126,12 @@ def _parse_validator(raw: Any, skill_root: Path | None = None) -> tuple[int, Val
     ]
     tier = _as_dict(data.get("gating")).get("tier")
 
+    # 上游有些检查只把问题写进 legacy.errors，不产出结构化 finding——
+    # dead_links 就是其中之一（hygiene 里走的是 add_error）。不读这一块的话，
+    # 一个因为死链失败的 validator 在对外结果里是 passed=false + findings=[]，
+    # 界面只能显示"某项没通过"，说不出为什么。
+    errors = [e for e in _as_str_list(_as_dict(data.get("legacy")).get("errors")) if e]
+
     return (
         tier if isinstance(tier, int) else 1,
         ValidatorOutcome(
@@ -134,6 +140,7 @@ def _parse_validator(raw: Any, skill_root: Path | None = None) -> tuple[int, Val
             passed=bool(data.get("passed", False)),
             status=str(data.get("status", "")),
             findings=findings,
+            errors=errors,
         ),
     )
 
@@ -167,6 +174,7 @@ def to_dto(
     skill_id: str,
     content_hash: str,
     skill_version: str | None = None,
+    context_hash: str | None = None,
     outcome: RunOutcome,
     report_url: str | None = None,
     evaluator_version: str | None = None,
@@ -217,6 +225,7 @@ def to_dto(
         # 版本号来自触发方，不在上游报告里，原样透传。
         skill_version=skill_version,
         content_hash=content_hash,
+        context_hash=context_hash,
         status=status,
         gate_passed=raw_passed if isinstance(raw_passed, bool) else None,
         evaluated_at=evaluated_at,

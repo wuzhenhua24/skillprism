@@ -78,6 +78,7 @@ def enqueue(
     content_hash: str | None = None,
     tier: Tier = Tier.TIER1,
     force: bool = False,
+    bundle: bool = False,
 ) -> EvaluationTask:
     """排一条任务。
 
@@ -93,6 +94,7 @@ def enqueue(
         queue=QUEUE_BY_TIER[tier],
         state=str(TaskState.QUEUED),
         force=force,
+        bundle=bundle,
     )
     session.add(task)
     session.flush()

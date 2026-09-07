@@ -22,6 +22,13 @@ MAX_FILES = 512
 MAX_FILE_BYTES = 4 * 1024 * 1024
 MAX_TOTAL_BYTES = 32 * 1024 * 1024
 
+#: 一组耦合 skill（bundle）的物化上限。单文件上限不放宽——那个约束和一组
+#: 里有几个 skill 无关。条目数与总量按成员数上限同比例放宽，不是"随便调大"：
+#: 一个 bundle 就是若干个 skill 加少量共享文件。
+MAX_BUNDLE_MEMBERS = 32
+MAX_BUNDLE_FILES = 2048
+MAX_BUNDLE_TOTAL_BYTES = 128 * 1024 * 1024
+
 #: SkillEvaluator 以根目录下的 SKILL.md 识别一个 skill。
 SKILL_MANIFEST = "SKILL.md"
 
@@ -54,6 +61,24 @@ class SkillFile:
 
     path: str
     data: bytes
+
+
+@dataclass(frozen=True)
+class SkillBundle:
+    """一组互相耦合的 skill，作为一个整体取回、物化、评测。
+
+    ``files`` 的路径相对 **bundle 根**（``code-review/SKILL.md``、
+    ``shared/api.md``），不是相对某个 skill；``members`` 是根下直接含
+    ``SKILL.md`` 的一级子目录名，也就是 SkillEvaluator 的 catalog 模式会
+    识别成 skill 的那些目录。
+
+    不属于任何成员的文件（共享参考文档、根上的 README）照样保留：耦合的
+    典型形态就是几个 skill 共同引用一份约定，丢掉它们等于把跨 skill 链接
+    重新变成死链——那正是要解决的问题。
+    """
+
+    files: list[SkillFile]
+    members: list[str]
 
 
 def safe_relative_path(raw: str) -> PurePosixPath:
@@ -123,18 +148,24 @@ def compute_content_hash(files: Iterable[SkillFile]) -> str:
     return f"sha256:{outer.hexdigest()}"
 
 
-def _validate_budget(files: Sequence[SkillFile]) -> None:
-    if len(files) > MAX_FILES:
-        raise MaterializeError(f"文件数超限：{len(files)} > {MAX_FILES}")
+def _validate_budget(
+    files: Sequence[SkillFile],
+    *,
+    max_files: int = MAX_FILES,
+    max_total_bytes: int = MAX_TOTAL_BYTES,
+) -> None:
+    if len(files) > max_files:
+        raise MaterializeError(f"文件数超限：{len(files)} > {max_files}")
 
     total = 0
     for item in files:
         size = len(item.data)
+        # 单文件上限不随 bundle 放宽：一个文件多大，和一组里有几个 skill 无关。
         if size > MAX_FILE_BYTES:
             raise MaterializeError(f"单文件超限：{item.path} 为 {size} 字节 > {MAX_FILE_BYTES}")
         total += size
-    if total > MAX_TOTAL_BYTES:
-        raise MaterializeError(f"总字节数超限：{total} > {MAX_TOTAL_BYTES}")
+    if total > max_total_bytes:
+        raise MaterializeError(f"总字节数超限：{total} > {max_total_bytes}")
 
 
 def materialize(files: Sequence[SkillFile], dest: Path, *, name: str) -> Path:
@@ -174,7 +205,15 @@ def materialize(files: Sequence[SkillFile], dest: Path, *, name: str) -> Path:
     skill_root = dest / SKILLS_PARENT / safe_name.as_posix()
     skill_root.mkdir(parents=True, exist_ok=True)
 
-    root = skill_root.resolve(strict=True)
+    return _write_tree(files, safe_paths, skill_root.resolve(strict=True))
+
+
+def _write_tree(
+    files: Sequence[SkillFile],
+    safe_paths: Sequence[PurePosixPath],
+    root: Path,
+) -> Path:
+    """把校验过的路径写进 ``root``。落盘前还有两道兜底，不依赖上游校验。"""
     for item, rel in zip(files, safe_paths, strict=True):
         target = root / Path(*rel.parts)
 
@@ -198,6 +237,56 @@ def materialize(files: Sequence[SkillFile], dest: Path, *, name: str) -> Path:
         target.write_bytes(item.data)
 
     return root
+
+
+def materialize_bundle(bundle: SkillBundle, dest: Path) -> Path:
+    """把一组耦合 skill 写进 ``dest/skills/``，返回该目录（catalog 根）。
+
+    返回的是**父目录**而不是某个 skill 目录，这是与 :func:`materialize` 的
+    关键区别：SkillEvaluator 对着一个"自身没有 SKILL.md、但含 ``*/SKILL.md``"
+    的目录会自动按 catalog 逐个评，每个成员一份独立报告。成员的兄弟目录因此
+    留在盘上，跨 skill 的相对链接能解析——单独物化一个 skill 时它们全是死链，
+    那是我们的物化方式造成的误报，不是 skill 的问题。
+
+    成员目录名直接用仓库里的名字，不像单 skill 那样用管理系统的登记名：
+    一次提交对应多个 skill，登记名只有一个，给不出 N 个；而仓库里的目录名
+    本来就是作者写在 frontmatter 里的那个，name_consistency 该怎么判就怎么判。
+    """
+    files = list(bundle.files)
+    _validate_budget(files, max_files=MAX_BUNDLE_FILES, max_total_bytes=MAX_BUNDLE_TOTAL_BYTES)
+
+    if not bundle.members:
+        raise MaterializeError("bundle 没有任何成员")
+    for member in bundle.members:
+        if len(safe_relative_path(member).parts) != 1:
+            raise MaterializeError(f"成员名必须是单段目录名：{member!r}")
+
+    safe_paths = [safe_relative_path(item.path) for item in files]
+
+    seen: set[str] = set()
+    for path in safe_paths:
+        key = path.as_posix()
+        if key in seen:
+            raise MaterializeError(f"路径重复：{key}")
+        seen.add(key)
+
+    for member in bundle.members:
+        if f"{member}/{SKILL_MANIFEST}" not in seen:
+            raise MaterializeError(f"成员 {member!r} 下没有 {SKILL_MANIFEST}")
+
+    # catalog 根上不能有 SKILL.md：有的话 SkillEvaluator 会把整个目录当成
+    # 一个 skill，静默退回单 skill 模式，成员一个都不会被单独评。
+    if SKILL_MANIFEST in seen:
+        raise MaterializeError(f"bundle 根目录不能有 {SKILL_MANIFEST}，那样会被当成单个 skill")
+
+    dest = dest.resolve()
+    if dest.exists() and any(dest.iterdir()):
+        raise MaterializeError(f"目标目录非空：{dest}")
+
+    catalog_root = dest / SKILLS_PARENT
+    catalog_root.mkdir(parents=True, exist_ok=True)
+
+    return _write_tree(files, safe_paths, catalog_root.resolve(strict=True))
 
 
 def cleanup(path: Path) -> None:

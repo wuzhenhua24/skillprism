@@ -17,8 +17,15 @@ from urllib.parse import quote, urlencode
 
 import httpx
 
-from skillprism.archive import ArchiveError, read_skill_zip
-from skillprism.materialize import MAX_FILE_BYTES, SkillFile, UnsafePathError, safe_relative_path
+from skillprism.archive import ArchiveError, read_skill_bundle, read_skill_zip
+from skillprism.materialize import (
+    MAX_FILE_BYTES,
+    SKILL_MANIFEST,
+    SkillBundle,
+    SkillFile,
+    UnsafePathError,
+    safe_relative_path,
+)
 
 
 class SkillNotFoundError(LookupError):
@@ -28,6 +35,15 @@ class SkillNotFoundError(LookupError):
 class SkillContentSource(Protocol):
     def fetch(self, skill_id: str, version: str | None = None) -> list[SkillFile]:
         """取回一个 skill 的全部文件。路径为仓库内相对路径，未经校验。"""
+        ...
+
+    def fetch_bundle(self, skill_id: str, version: str | None = None) -> SkillBundle:
+        """取回一组耦合 skill。路径相对 bundle 根，未经校验。
+
+        与 :meth:`fetch` 分开而不是靠内容形态自动判别：调用方知道自己注册的
+        是一个 skill 还是一套工作流，说出来才能在不一致时报错。让内容形态
+        决定语义的话，``skill_id`` 少写一层子目录就会静默变成评另一批东西。
+        """
         ...
 
 
@@ -61,6 +77,32 @@ class LocalDirectorySource:
         if not files:
             raise SkillNotFoundError(f"skill 内容为空：{skill_id}")
         return files
+
+    def fetch_bundle(self, skill_id: str, version: str | None = None) -> SkillBundle:
+        """把 ``<root>/<skill_id>`` 当作一组 skill 的父目录。"""
+        base = self.root / skill_id
+        if not base.is_dir():
+            raise SkillNotFoundError(f"找不到 bundle：{skill_id}")
+        if (base / SKILL_MANIFEST).is_file():
+            raise SkillNotFoundError(
+                f"{skill_id} 根上有 {SKILL_MANIFEST}：这是单个 skill，不是一组"
+            )
+
+        files: list[SkillFile] = []
+        for path in sorted(base.rglob("*")):
+            if not path.is_file() or path.is_symlink():
+                continue
+            if path.stat().st_size > MAX_FILE_BYTES:
+                continue
+            files.append(SkillFile(path=path.relative_to(base).as_posix(), data=path.read_bytes()))
+
+        members = sorted(
+            child.name for child in base.iterdir()
+            if child.is_dir() and not child.is_symlink() and (child / SKILL_MANIFEST).is_file()
+        )
+        if not members:
+            raise SkillNotFoundError(f"{skill_id} 下没有任何含 {SKILL_MANIFEST} 的子目录")
+        return SkillBundle(files=files, members=members)
 
 
 class ContentFetchError(RuntimeError):
@@ -159,6 +201,13 @@ class ZipArchiveSource:
             return read_skill_zip(data)
         except ArchiveError as exc:
             # 归档内容有问题是 skill 的问题，不是取回失败，重试没有意义。
+            raise SkillNotFoundError(f"归档无法解出（{skill_id}）：{exc}") from exc
+
+    def fetch_bundle(self, skill_id: str, version: str | None = None) -> SkillBundle:
+        data = self._download(self._url(skill_id))
+        try:
+            return read_skill_bundle(data)
+        except ArchiveError as exc:
             raise SkillNotFoundError(f"归档无法解出（{skill_id}）：{exc}") from exc
 
 
@@ -286,6 +335,28 @@ class GitLabArchiveSource:
         )
 
     def fetch(self, skill_id: str, version: str | None = None) -> list[SkillFile]:
+        project, ref, subdir, data = self._download_archive(skill_id, version)
+        try:
+            return read_skill_zip(data, subdir=subdir)
+        except ArchiveError as exc:
+            # 归档内容有问题是 skill 的问题，不是取回失败，重试没有意义。
+            raise SkillNotFoundError(f"归档无法解出（{project}@{ref}）：{exc}") from exc
+
+    def fetch_bundle(self, skill_id: str, version: str | None = None) -> SkillBundle:
+        """``skill_id`` 指向仓库里装着多个 skill 的父目录，例 ``group/repo:skills``。
+
+        成员的兄弟目录会一并取回来，这正是 bundle 的意义：跨 skill 的相对
+        链接要能解析。
+        """
+        project, ref, subdir, data = self._download_archive(skill_id, version)
+        try:
+            return read_skill_bundle(data, subdir=subdir)
+        except ArchiveError as exc:
+            raise SkillNotFoundError(f"归档无法解出（{project}@{ref}）：{exc}") from exc
+
+    def _download_archive(
+        self, skill_id: str, version: str | None
+    ) -> tuple[str, str, str | None, bytes]:
         project, subdir = split_skill_id(skill_id)
         ref = validate_ref(version or self.default_ref)
         url = self._url(project, ref, subdir)
@@ -303,11 +374,7 @@ class GitLabArchiveSource:
                 + "：项目/ref/路径不存在，或令牌对该项目无权限"
             ),
         )
-        try:
-            return read_skill_zip(data, subdir=subdir)
-        except ArchiveError as exc:
-            # 归档内容有问题是 skill 的问题，不是取回失败，重试没有意义。
-            raise SkillNotFoundError(f"归档无法解出（{project}@{ref}）：{exc}") from exc
+        return project, ref, subdir, data
 
 
 def build_content_source(settings) -> SkillContentSource:

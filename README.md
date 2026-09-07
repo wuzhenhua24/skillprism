@@ -411,6 +411,67 @@ zip 接入每次上传换一个资源 ID，一个 `skill_id` 基本只有一条�
 查准了、点开报告却是另一份"——补 `content_hash` 之前的 `/report` 就是这样，
 由 `test_report_follows_content_hash` 钉住。
 
+### 一组耦合 skill
+
+一套研发工作流常拆成几个 skill，彼此有跨目录引用。这种情况**必须整套一起评**，
+不能一个个来。
+
+单独物化一个成员，它指向兄弟 skill 的相对链接全部变成死链——那是我们的物化
+方式造成的误报，不是 skill 的问题，而且耦合越紧分数越难看。实测：单独评
+`code-review` 报 `Dead link in SKILL.md: ../test-gen/SKILL.md` 并因此判 fail；
+同样的内容整套一起评，`Code Integrity & Hygiene` 通过。两个方向都由
+`tests/test_e2e_bundle.py` 钉住——只测后者的话，哪天物化改回单个也没人会发现。
+
+**怎么触发。** 提交时把 `bundle` 置为 true，`skill_id` 指向装着多个 skill 的
+父目录：
+
+```json
+{
+  "skill_id": "group/repo:skills",
+  "skill_name": "dev-workflow",
+  "skill_version": "v1.2.0",
+  "bundle": true
+}
+```
+
+由触发方声明，我们**不看内容形态推断**：`skill_id` 少写一层子目录就会静默
+变成评另一批东西。声明与内容不符时任务直接失败并说明原因（根上有 `SKILL.md`
+= 这是单个 skill；没有任何含 `SKILL.md` 的一级子目录 = 不是一组）。
+
+**怎么查结果。** 一次提交产出多条结果，每个成员一条，成员的 `skill_id` 就是
+它单独提交时会用的那个：
+
+| bundle | 成员结果的 skill_id |
+| --- | --- |
+| `group/repo:skills` | `group/repo:skills/code-review`、`group/repo:skills/test-gen` |
+
+管理系统因此不需要第二套查询方式。bundle 的 ID 本身不挂结论——它不是一个 skill。
+
+**底层是 SkillEvaluator 的 catalog 模式。** 对着一个"自身没有 `SKILL.md`、
+但含 `*/SKILL.md`"的目录，它自动逐个跑完整 Tier 1，每个成员一份独立报告；
+成员的兄弟目录留在盘上，跨 skill 链接因此能解析。不需要额外开关，我们只是
+把物化根从单个 skill 目录换成了它们的父目录。不含 `SKILL.md` 的目录
+（`shared/` 之类）不算成员，但会一并物化——耦合的典型形态就是几个 skill
+共引一份约定。
+
+**复用判据多了一维上下文。** 成员结论不只取决于它自己的字节：一组里改了 A，
+B 的字节没变但结论可能变（B 引用 A 的文件，A 改名或删了 B 就多出死链）。所以
+每条结论记 `context_hash`（整套的指纹，单独评的为 null），精确相等才复用，
+**NULL 与非 NULL 不互认**——同一个 skill 单独评和在一组里评结论本来就不同。
+报告地址也带上它，否则后跑的会覆盖先跑的，而先跑那次的结果行还指着这个地址。
+这一条错了不会报警，只会给出一个看起来完全正常的过期结论，所以由
+`tests/test_result_reuse.py` 单独钉住。
+
+**上限**：一组最多 32 个成员、2048 个文件、128MB；单文件上限仍是 4MB
+（一个文件多大和一组里有几个 skill 无关）。
+
+**没有做的：让"调用"本身可见。** SKILL.md 的 frontmatter 里没有依赖字段
+（上游 `models/skill.py` 只有 name/description/license/compatibility/metadata/
+allowed-tools），SkillEvaluator 也没有跨 skill 依赖的校验器——没有"A 引用的 B
+存不存在"、"有没有循环调用"这类检查。当前能看见的耦合只有 **markdown 链接**
+（靠 `dead_links` 体现）；写在正文里的自然语言调用（"先跑 code-review"）对
+底层完全不可见。要检查调用关系得先和上游定一个声明依赖的约定。
+
 ### 解归档是我们的安全边界
 
 物化层防的是**路径**，不是**归档格式**。以下四类风险由
@@ -524,6 +585,8 @@ SKILL_EVAL_EMBEDDING_API_KEY=<ARK_API_KEY>
 - **Tier 3**：需要 Docker/K8s 沙箱、agent 凭据、评测预算。`sandbox` 队列与 `tiers.tier3` 已预留。
 - **扫描器版本未纳入复用判据**：见上面「结论按内容复用」。
 - **批量查询结果**：列表页按 skill_id 逐个查会打 N 次，需要时补。
+- **跨 skill 调用关系的校验**：见上面「一组耦合 skill」的最后一段，
+  需要先和上游定一个声明依赖的约定。
 - **结果回调**：当前只支持轮询。前提是触发方与展示方都是管理系统；触发方
   改成 CI / push webhook 时需要重新评估，见上面「结果怎么回去」。
 - **鉴权**：API 尚无认证，接入前需补。

@@ -46,6 +46,11 @@ class EvaluationTask(Base):
     #: 强制重跑。缓存判定在 worker 里做，所以这个意图必须随任务落库。
     force: Mapped[bool] = mapped_column(Boolean, default=False)
 
+    #: 这个任务评的是一组耦合 skill（skill_id 指向装着多个 skill 的父目录），
+    #: 一次产出多条结果。由触发方声明而不是看内容形态推断——少写一层子目录
+    #: 就静默换成评另一批东西，这种错必须报出来。
+    bundle: Mapped[bool] = mapped_column(Boolean, default=False)
+
     state: Mapped[str] = mapped_column(String(16), default="queued", index=True)
     attempts: Mapped[int] = mapped_column(Integer, default=0)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -71,6 +76,13 @@ class EvaluationResult(Base):
     #: 触发方声明的版本号。结果自身必须带版本，否则界面只能显示一串 hash，
     #: 说不出“这是 v2.0.0 的结论”。仅作标签用，不参与去重。
     skill_version: Mapped[str | None] = mapped_column(String(128), nullable=True)
+
+    #: 评这条结论时所在的 bundle 的整体内容指纹；单独评的为 NULL。
+    #:
+    #: 复用判据必须带上它。一组耦合 skill 里改了 A，B 的字节没变，但 B 的
+    #: 结论可能变——它引用 A 的文件，A 改名或删了，B 就多出死链。只按
+    #: content_hash 复用会把过期结论当成有效结论给出去，而且看起来完全正常。
+    context_hash: Mapped[str | None] = mapped_column(String(80), nullable=True, index=True)
 
     status: Mapped[str] = mapped_column(String(16), index=True)
     #: 阻断级检查是否通过，与 status 正交，见 schemas.EvaluationDTO。
@@ -113,5 +125,8 @@ class EvaluationDetail(Base):
     status: Mapped[str] = mapped_column(String(32), default="")
     #: 问题明细整体以 JSON 存，结构跟随上游而不绑定表结构。
     findings: Mapped[list] = mapped_column(JSON, default=list)
+    #: 上游 legacy.errors 里的纯文本问题，没有 severity 也没有位置。
+    #: 死链走的是这个通道，不存的话结果页说不出 validator 为什么没通过。
+    errors: Mapped[list] = mapped_column(JSON, default=list)
 
     result: Mapped[EvaluationResult] = relationship(back_populates="details")

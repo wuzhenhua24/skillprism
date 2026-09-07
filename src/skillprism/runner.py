@@ -18,6 +18,7 @@ import logging
 import os
 import shutil
 import subprocess
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -176,6 +177,44 @@ def build_command(settings: Settings, skill_dir: Path, out_dir: Path) -> list[st
     ]
 
 
+def _run_cli(
+    settings: Settings, target: Path, out_dir: Path
+) -> tuple[subprocess.CompletedProcess | None, int, str | None, bool]:
+    """跑一次 CLI。返回 ``(proc, exit_code, failure, timed_out)``。
+
+    ``proc`` 为 None 表示进程层面就没跑起来（超时或起不来），此时没有任何
+    报告可读，``failure`` 说明原因。
+    """
+    command = build_command(settings, target, out_dir)
+    try:
+        proc = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=settings.eval_timeout_seconds,
+            check=False,
+            env=_subprocess_env(settings),
+        )
+    except subprocess.TimeoutExpired as exc:
+        return None, EXIT_RUNTIME_ERROR, f"评测超时（{settings.eval_timeout_seconds}s）：{exc}", True
+    except OSError as exc:
+        return None, EXIT_CONFIG_ERROR, f"无法启动评测进程：{exc}", False
+    return proc, proc.returncode, None, False
+
+
+def _load_report(json_path: Path | None) -> tuple[dict[str, Any] | None, str | None]:
+    """读一份 JSON 报告，返回 ``(报告, 失败原因)``。"""
+    if json_path is None:
+        return None, "未找到 JSON 报告"
+    try:
+        loaded = json.loads(json_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return None, f"读取 JSON 报告失败：{exc}"
+    if not isinstance(loaded, dict):
+        return None, "JSON 报告不是对象"
+    return loaded, None
+
+
 def _locate_reports(out_dir: Path) -> tuple[Path | None, Path | None]:
     """在输出目录里找报告。文件名带时间戳，不能写死。"""
     json_candidates = sorted(p for p in out_dir.rglob("*.json") if not p.name.endswith(".sarif.json"))
@@ -183,6 +222,76 @@ def _locate_reports(out_dir: Path) -> tuple[Path | None, Path | None]:
     return (
         json_candidates[-1] if json_candidates else None,
         html_candidates[-1] if html_candidates else None,
+    )
+
+
+@dataclass
+class CatalogOutcome:
+    """一次 catalog 调用的产物：整体进程状态 + 每个成员一份报告。
+
+    退出码是整个 catalog 的（任一成员失败即非零），所以它**不能**用来判断
+    单个成员的结论——那要看各自报告里的 overall_status。这里只用它区分
+    "进程层面的故障"（超时、起不来）和"跑完了，有成员没通过"。
+    """
+
+    members: dict[str, RunOutcome]
+    exit_code: int
+    stdout: str = ""
+    stderr: str = ""
+    timed_out: bool = False
+    failure: str | None = None
+
+    @property
+    def retryable(self) -> bool:
+        if self.timed_out:
+            return True
+        return self.exit_code in RETRYABLE_EXIT_CODES
+
+
+def run_catalog(
+    settings: Settings,
+    catalog_root: Path,
+    out_dir: Path,
+    members: Sequence[str],
+) -> CatalogOutcome:
+    """对一组 skill 跑一次评测。
+
+    命令和单 skill 完全一样，只是目标指向父目录：SkillEvaluator 见到一个
+    "自身没有 SKILL.md、但含 ``*/SKILL.md``"的目录就按 catalog 逐个评，
+    每个成员一份独立报告落在 ``<out_dir>/<成员>/``。不需要额外的开关。
+
+    成员列表由调用方给，不去扫 ``out_dir``：少了谁必须能看出来。按输出目录
+    反推的话，一个成员崩了只会表现成"结果里没有它"，而不是一条错误。
+    """
+    out_dir.mkdir(parents=True, exist_ok=True)
+    proc, exit_code, failure, timed_out = _run_cli(settings, catalog_root, out_dir)
+    if proc is None:
+        return CatalogOutcome(
+            members={},
+            exit_code=exit_code,
+            stderr=failure or "",
+            timed_out=timed_out,
+            failure=failure,
+        )
+
+    outcomes: dict[str, RunOutcome] = {}
+    for member in members:
+        member_dir = out_dir / member
+        json_path, html_path = _locate_reports(member_dir) if member_dir.is_dir() else (None, None)
+        report, failure = _load_report(json_path)
+        outcomes[member] = RunOutcome(
+            exit_code=exit_code,
+            report=report,
+            report_json_path=json_path,
+            report_html_path=html_path,
+            failure=failure,
+        )
+
+    return CatalogOutcome(
+        members=outcomes,
+        exit_code=exit_code,
+        stdout=proc.stdout or "",
+        stderr=proc.stderr or "",
     )
 
 
@@ -209,54 +318,23 @@ def policy_file_hash(settings: Settings) -> str:
 def run_validate(settings: Settings, skill_dir: Path, out_dir: Path) -> RunOutcome:
     """跑一次 Tier 1 评测。任何进程层面的异常都收敛成 RunOutcome，不外抛。"""
     out_dir.mkdir(parents=True, exist_ok=True)
-    command = build_command(settings, skill_dir, out_dir)
-
-    try:
-        proc = subprocess.run(
-            command,
-            capture_output=True,
-            text=True,
-            timeout=settings.eval_timeout_seconds,
-            check=False,
-            env=_subprocess_env(settings),
-        )
-    except subprocess.TimeoutExpired as exc:
+    proc, exit_code, failure, timed_out = _run_cli(settings, skill_dir, out_dir)
+    if proc is None:
         return RunOutcome(
-            exit_code=EXIT_RUNTIME_ERROR,
+            exit_code=exit_code,
             report=None,
             report_json_path=None,
             report_html_path=None,
-            stderr=str(exc),
-            timed_out=True,
-            failure=f"评测超时（{settings.eval_timeout_seconds}s）",
-        )
-    except OSError as exc:
-        return RunOutcome(
-            exit_code=EXIT_CONFIG_ERROR,
-            report=None,
-            report_json_path=None,
-            report_html_path=None,
-            stderr=str(exc),
-            failure=f"无法启动评测进程：{exc}",
+            stderr=failure or "",
+            timed_out=timed_out,
+            failure=failure,
         )
 
     json_path, html_path = _locate_reports(out_dir)
-    report: dict[str, Any] | None = None
-    failure: str | None = None
-
-    if json_path is not None:
-        try:
-            loaded = json.loads(json_path.read_text(encoding="utf-8"))
-            report = loaded if isinstance(loaded, dict) else None
-            if report is None:
-                failure = "JSON 报告不是对象"
-        except (OSError, json.JSONDecodeError) as exc:
-            failure = f"读取 JSON 报告失败：{exc}"
-    else:
-        failure = "未找到 JSON 报告"
+    report, failure = _load_report(json_path)
 
     return RunOutcome(
-        exit_code=proc.returncode,
+        exit_code=exit_code,
         report=report,
         report_json_path=json_path,
         report_html_path=html_path,

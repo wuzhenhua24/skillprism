@@ -44,6 +44,7 @@ def _seed(session, **overrides) -> EvaluationResult:
         skill_id=overrides.pop("skill_id", "2000705"),
         skill_version=overrides.pop("skill_version", "1.0.0"),
         content_hash=overrides.pop("content_hash", CONTENT),
+        context_hash=overrides.pop("context_hash", None),
         status=overrides.pop("status", "passed"),
         gate_passed=True,
         score=91.5,
@@ -78,6 +79,7 @@ def _lookup(session, **kwargs):
         kwargs.pop("content_hash", CONTENT),
         evaluator_version=kwargs.pop("evaluator_version", EVALUATOR),
         policy_file_hash=kwargs.pop("policy_file_hash", POLICY),
+        context_hash=kwargs.pop("context_hash", None),
     )
 
 
@@ -156,3 +158,56 @@ def test_clone_does_not_disturb_the_source(factory):
         assert source.skill_id == "2000705"
         assert source.skill_version == "1.0.0"
         assert len(source.details) == 1
+
+
+# ---- 一组耦合 skill 的上下文 ----
+
+BUNDLE = "sha256:bundle-v1"
+
+
+def test_a_result_from_a_bundle_is_not_reused_standalone(factory):
+    """在一组里评出来的结论，不能拿去当单独评的结论。
+
+    上下文不同结论就不同：一组里跨 skill 链接能解析，单独评时全是死链。
+    复用过去会给出一个在当前上下文下并不成立的结论，而且看起来完全正常
+    ——这是这组判据里最容易漏、漏了又最难查的一条。
+    """
+    with factory() as session:
+        _seed(session, context_hash=BUNDLE)
+        assert _lookup(session) is None
+
+
+def test_a_standalone_result_is_not_reused_inside_a_bundle(factory):
+    """反向同理。NULL 与非 NULL 不互认。"""
+    with factory() as session:
+        _seed(session, context_hash=None)
+        assert _lookup(session, context_hash=BUNDLE) is None
+
+
+def test_the_same_bundle_context_is_reusable(factory):
+    """同一套内容重复触发要命中缓存，否则每次触发都重跑整套。"""
+    with factory() as session:
+        _seed(session, context_hash=BUNDLE)
+        assert _lookup(session, context_hash=BUNDLE) is not None
+
+
+def test_a_changed_sibling_invalidates_an_unchanged_member(factory):
+    """一组里改了别的 skill，本成员字节没变也不能复用。
+
+    它引用兄弟 skill 的文件——对方改名或删了，这边就多出死链。整套指纹
+    变了，上下文就变了，必须重评。
+    """
+    with factory() as session:
+        _seed(session, context_hash=BUNDLE)
+        assert _lookup(session, context_hash="sha256:bundle-v2") is None
+
+
+def test_clone_carries_the_context(factory):
+    """克隆丢掉上下文的话，这条看起来就是"单独评出来的"，
+    之后按上下文找复用会命中一条其实来自别的上下文的结论。"""
+    with factory() as session:
+        source = _seed(session, skill_id="group/repo:skills/a", context_hash=BUNDLE)
+        cloned = clone_result(
+            session, source, skill_id="group/repo:skills/b", skill_version="v2"
+        )
+        assert cloned.context_hash == BUNDLE

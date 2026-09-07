@@ -34,6 +34,11 @@ class ValidatorOutcome(BaseModel):
     passed: bool
     status: str
     findings: list[Finding] = Field(default_factory=list)
+    #: 上游用两个通道报问题：结构化的 findings（带 severity 与位置），
+    #: 以及只有一句话的 legacy errors。死链就走后者——``passed`` 为 false
+    #: 而 ``findings`` 为空，光看结构化字段说不出"为什么没通过"。
+    #: 这里如实透传，不给它们编一个 severity：上游没给，编了就是假的。
+    errors: list[str] = Field(default_factory=list)
 
 
 class TierResult(BaseModel):
@@ -70,6 +75,10 @@ class EvaluationDTO(BaseModel):
     #: 触发方声明的版本号。content_hash 标识内容，这个标识人看得懂的版本。
     skill_version: str | None = None
     content_hash: str
+    #: 这条结论所在的一组耦合 skill 的整体指纹；单独评的为 null。
+    #: 对外可见是有意的：同一个 skill 单独评和在一组里评结论可能不同，
+    #: 界面要能说出这条是在哪种上下文下得到的。
+    context_hash: str | None = None
     status: EvaluationStatus
     #: 阻断级检查是否全部通过。与 status 正交：status 为 incomplete 时
     #: 仍可能存在 critical/high 问题，单看 status 会漏掉这一点。
@@ -106,6 +115,12 @@ class SubmitRequest(BaseModel):
     tier: Tier = Tier.TIER1
     #: 内容未变时默认复用已有结果；置 true 强制重跑。
     force: bool = False
+    #: 这次评的是一组耦合 skill：``skill_id`` 指向装着多个 skill 的父目录
+    #: （GitLab 接入下形如 ``group/repo:skills``），一次提交产出多条结果。
+    #:
+    #: 必须由触发方声明，我们不看内容形态推断——``skill_id`` 少写一层子目录
+    #: 就会静默变成评另一批东西。声明与内容不符时任务直接失败并说明原因。
+    bundle: bool = False
 
 
 class SubmitResponse(BaseModel):

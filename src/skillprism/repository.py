@@ -43,6 +43,7 @@ def find_reusable_result(
     *,
     evaluator_version: str | None,
     policy_file_hash: str,
+    context_hash: str | None = None,
 ) -> EvaluationResult | None:
     """找一条可以直接复用的结论。**刻意不看 skill_id。**
 
@@ -65,6 +66,12 @@ def find_reusable_result(
     **没**卡住的是外部扫描器自身的版本（semgrep / skillspector / gitleaks）。
     它们漂移时这里会给出旧结论，逃生口是 force=true。原有的缓存也有同样的
     问题，这里没让它变严重，但也没有解决它。
+
+    第四个条件是 ``context_hash``：一组耦合 skill 里，成员的结论不只取决于
+    它自己的字节。A 改名或删了文件，引用它的 B 字节没变、结论却该变。所以
+    上下文必须精确相等才复用——包括 NULL 与非 NULL 不互认：同一个 skill
+    单独评（兄弟目录不在盘上，跨 skill 链接是死链）和在一组里评，结论本来
+    就不一样，互相复用会给出一个在当前上下文下并不成立的结论。
     """
     if not policy_file_hash:
         return None
@@ -74,6 +81,9 @@ def find_reusable_result(
             EvaluationResult.content_hash == content_hash,
             EvaluationResult.evaluator_version == evaluator_version,
             EvaluationResult.policy_file_hash == policy_file_hash,
+            EvaluationResult.context_hash.is_(None)
+            if context_hash is None
+            else EvaluationResult.context_hash == context_hash,
         )
         .order_by(EvaluationResult.evaluated_at.desc())
     )
@@ -92,7 +102,8 @@ def clone_result(
 ) -> EvaluationResult:
     """把一条既有结论挂到另一个资源 ID 上。
 
-    报告按 content_hash 寻址（见 storage.py），URI 直接共用，不复制文件。
+    报告按 (content_hash, context_hash) 寻址（见 storage.py），两者都相同才
+    共用 URI，所以这里直接复用不复制文件。
     ``evaluated_at`` 保持原值——评测确实是那时候跑的，改掉它等于谎报。
     """
     row = EvaluationResult(
@@ -100,6 +111,9 @@ def clone_result(
         skill_id=skill_id,
         skill_version=skill_version,
         content_hash=source.content_hash,
+        # 上下文必须跟着走：丢掉的话这条克隆看起来就是"单独评出来的"，
+        # 之后按上下文找复用会命中一条其实来自别的上下文的结论。
+        context_hash=source.context_hash,
         status=source.status,
         gate_passed=source.gate_passed,
         score=source.score,
@@ -123,6 +137,7 @@ def clone_result(
                 passed=detail.passed,
                 status=detail.status,
                 findings=list(detail.findings or []),
+                errors=list(detail.errors or []),
             )
         )
     session.add(row)
@@ -149,6 +164,7 @@ def save_result(
         skill_id=dto.skill_id,
         skill_version=dto.skill_version,
         content_hash=dto.content_hash,
+        context_hash=dto.context_hash,
         status=str(dto.status),
         gate_passed=dto.gate_passed,
         score=dto.score,
@@ -177,6 +193,7 @@ def save_result(
                     passed=validator.passed,
                     status=validator.status,
                     findings=[f.model_dump(mode="json") for f in validator.findings],
+                    errors=list(validator.errors),
                 )
             )
 
@@ -195,6 +212,7 @@ def result_to_dto(row: EvaluationResult, *, report_url: str | None = None) -> Ev
                 passed=detail.passed,
                 status=detail.status,
                 findings=[Finding.model_validate(f) for f in (detail.findings or [])],
+                errors=list(detail.errors or []),
             )
         )
 
@@ -216,6 +234,7 @@ def result_to_dto(row: EvaluationResult, *, report_url: str | None = None) -> Ev
         skill_id=row.skill_id,
         skill_version=row.skill_version,
         content_hash=row.content_hash,
+        context_hash=row.context_hash,
         status=status,
         gate_passed=row.gate_passed,
         evaluated_at=row.evaluated_at,
