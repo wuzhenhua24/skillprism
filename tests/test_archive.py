@@ -173,3 +173,64 @@ def test_directory_entries_are_skipped():
         z.writestr("sub/a.md", b"a")
     files = read_skill_zip(buf.getvalue())
     assert {f.path for f in files} == {"SKILL.md", "sub/a.md"}
+
+
+# ---- 调用方声明子目录（Git 归档接入）----
+
+
+def test_subdir_strips_git_archive_prefix():
+    """Git 服务端打的包形如 <repo>-<ref>-<sha>/<子目录>/…，前缀含 sha，猜不出来。"""
+    data = build_zip(
+        [
+            ("repo-main-abc123/skills/foo/SKILL.md", MANIFEST),
+            ("repo-main-abc123/skills/foo/ref/a.md", b"a"),
+        ]
+    )
+    files = read_skill_zip(data, subdir="skills/foo")
+    assert {f.path for f in files} == {"SKILL.md", "ref/a.md"}
+
+
+def test_subdir_without_archive_root():
+    """没有顶层目录时也要能剥——不同 Git 服务端的打包形态不一样。"""
+    data = build_zip([("skills/foo/SKILL.md", MANIFEST), ("skills/foo/a.md", b"a")])
+    files = read_skill_zip(data, subdir="skills/foo")
+    assert {f.path for f in files} == {"SKILL.md", "a.md"}
+
+
+def test_subdir_mismatch_is_rejected():
+    """声明的子目录对不上就报错，不去试第二种解读。"""
+    data = build_zip([("repo-main-abc123/skills/bar/SKILL.md", MANIFEST)])
+    with pytest.raises(ArchiveError, match="没有声明的子目录"):
+        read_skill_zip(data, subdir="skills/foo")
+
+
+def test_subdir_does_not_bypass_manifest_check():
+    """剥前缀之后仍然必须有 SKILL.md，声明子目录不是豁免。"""
+    data = build_zip([("repo-main-abc123/skills/foo/README.md", b"x")])
+    with pytest.raises(ArchiveError, match="不是一个可评测的 skill"):
+        read_skill_zip(data, subdir="skills/foo")
+
+
+def test_subdir_does_not_swallow_files_outside_it():
+    """子目录之外还有文件时必须报错，不能悄悄丢掉——残缺的 skill 比失败更有害。"""
+    data = build_zip(
+        [
+            ("repo-main-abc123/skills/foo/SKILL.md", MANIFEST),
+            ("repo-main-abc123/README.md", b"x"),
+        ]
+    )
+    with pytest.raises(ArchiveError, match="没有声明的子目录"):
+        read_skill_zip(data, subdir="skills/foo")
+
+
+def test_subdir_still_rejects_symlinks():
+    """声明子目录不绕过任何一道归档防线。"""
+    data = build_zip(
+        [
+            ("repo-main-abc123/skills/foo/SKILL.md", MANIFEST),
+            ("repo-main-abc123/skills/foo/link", b"/etc/passwd"),
+        ],
+        symlinks=("repo-main-abc123/skills/foo/link",),
+    )
+    with pytest.raises(ArchiveError, match="符号链接"):
+        read_skill_zip(data, subdir="skills/foo")

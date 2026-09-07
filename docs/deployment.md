@@ -185,6 +185,10 @@ sudo chmod 640 /etc/skillprism/service.env
 `SKILLPRISM_SCANNER_ENV`，例如 `SEMGREP_VERSION_CHECK_TIMEOUT=1`。
 格式写错会在启动时直接报错，不会静默丢掉。
 
+走 GitLab 源时，**只有 worker 需要能访问 GitLab**，API 进程不需要——出网受限
+的机器上给 worker 单独放行内网 GitLab 的域名即可。令牌只给 `read_repository`，
+并且不要放进 `SKILLPRISM_SCANNER_ENV`（下一段说的就是这条隔离）。
+
 出网受限的机器不需要额外配置：semgrep 的版本检查与 metrics 上报已经默认关掉
 （`SEMGREP_ENABLE_VERSION_CHECK=0`、`SEMGREP_SEND_METRICS=off`）。这两件事
 对内网批量评测只有坏处——拖慢甚至挂住评测，还把被扫代码的相关数据发到外部。
@@ -502,6 +506,9 @@ worker 写的报告，所以两者必须同机。要真正横向扩展需要先�
 | 连不上数据库 | 连接串、密码或 PG 服务 | `sudo -u skillprism psql "$SKILLPRISM_DATABASE_URL" -c 'select 1'` |
 | 报告接口 404 但评测显示成功 | API 与 worker 不在同一文件系统 | 当前形态要求两者同机 |
 | 下载内容失败 | 区分两类：`SkillNotFoundError`（404 或归档解不出，不重试，直接 `failed`）与 `ContentFetchError`（5xx/网络，退避重试至 `MAX_ATTEMPTS`） | 看 worker 日志里的具体异常；任务的 `error` 字段也会带上它 |
+| 走 GitLab 源，**所有** skill 都报"取不到内容" | 令牌头名或权限不对。GitLab 对无权限的项目也返回 404（防枚举），而 404 在我们这里是不重试的终结态 | 先验令牌：`curl -H "PRIVATE-TOKEN: $TOKEN" "$BASE/api/v4/projects/<group%2Frepo>"`。PAT / group / project token 用 `PRIVATE-TOKEN`，CI 的 `CI_JOB_TOKEN` 只认 `JOB-TOKEN`，改 `SKILLPRISM_GITLAB_TOKEN_HEADER` |
+| 走 GitLab 源，报"归档里没有声明的子目录" | `skill_id` 里的子目录与仓库实际布局对不上 | `skill_id` 形如 `group/repo:skills/foo`，子目录是相对仓库根的路径且必须直接含 `SKILL.md` |
+| 走 GitLab 源，报"归档条目数超限"或"总大小超限" | 整仓取档了 | `skill_id` 必须带上子目录，否则会把整个仓库拉下来。单仓单 skill 才可以只写 `group/repo` |
 | 任务在 `queued` 与失败之间来回，`attempts` 在涨 | 正在退避重试 | `GET /api/tasks/{task_id}` 看 `error` 和 `next_attempt_at`——前者是上次失败的原因，后者是下次重试时间 |
 
 ## 十一、上生产前必须补的

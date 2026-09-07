@@ -29,8 +29,18 @@ def validate_skill_name(name: str) -> None:
         raise MaterializeError(f"skill_name 必须是单段名字，不能含路径分隔符：{name!r}")
 
 
-def submit(session: Session, request: SubmitRequest) -> SubmitResponse:
+def submit(
+    session: Session,
+    request: SubmitRequest,
+    *,
+    version_selects_content: bool = False,
+) -> SubmitResponse:
     """受理一次触发，立刻返回。
+
+    ``version_selects_content`` 由内容来源决定（见
+    :attr:`Settings.version_selects_content`），只影响排队去重的键。
+    这里收一个布尔而不是直接读配置：提交路径要能在测试里两种语义都跑到，
+    不该依赖进程级的全局配置。
 
     刻意不在这里下载内容。这个调用挂在用户上传流程后面，同步下载意味着
     对方要承担我们的网络耗时（超时上限 60s、包上限 64MB）和可用性——
@@ -47,11 +57,20 @@ def submit(session: Session, request: SubmitRequest) -> SubmitResponse:
         # 不上唯一索引是因为兜底已经存在——worker 会先算 hash 再查缓存，
         # 内容没变的重复任务不会真的跑评测器。这里收敛的是常见情况，
         # 不声称是强保证。
-        existing = task_queue.find_queued(session, request.skill_id, request.tier)
+        existing = task_queue.find_queued(
+            session,
+            request.skill_id,
+            request.tier,
+            skill_version=request.skill_version,
+            match_version=version_selects_content,
+        )
         if existing is not None:
             # 那条任务还没下载内容，跑起来取到的是最新的一份，所以身份
             # 信息要跟着更新到本次触发——否则结果会挂着旧版本号，
             # 描述的却是新内容。
+            #
+            # version_selects_content 为真时版本已经在去重键里，这里的赋值
+            # 是个恒等操作；留着是为了两条路径只有一份身份更新逻辑。
             existing.skill_name = request.skill_name
             existing.skill_version = request.skill_version
             session.flush()

@@ -26,21 +26,43 @@ QUEUE_BY_TIER = {
 }
 
 
-def find_queued(session: Session, skill_id: str, tier: Tier) -> EvaluationTask | None:
+def find_queued(
+    session: Session,
+    skill_id: str,
+    tier: Tier,
+    *,
+    skill_version: str | None = None,
+    match_version: bool = False,
+) -> EvaluationTask | None:
     """找一条同 skill 同 tier、尚未开跑的任务。
 
     只看 queued，不看 running：running 的任务**已经下载过内容**，它跑的是
     更早的那一份。把新的触发折叠进去，就等于宣称评了新内容却给出旧结论。
     running 期间的重复触发交给 worker 的缓存判定收敛——内容确实没变时，
     第二条任务算出同一个 hash，命中已有结果，不会真的重跑评测器。
+
+    ``match_version`` 为真时版本也进去重键。这是 GitLab 接入需要的：那里
+    ``skill_version`` 是 ref，两个 ref 是两份内容，折叠会犯上面同一个错误
+    ——只不过错在版本维度而不是时间维度。zip 接入下它是自由文本标签，
+    不进键，见 :attr:`Settings.version_selects_content`。
     """
+    conditions = [
+        EvaluationTask.skill_id == skill_id,
+        EvaluationTask.tier == str(tier),
+        EvaluationTask.state == str(TaskState.QUEUED),
+    ]
+    if match_version:
+        # 显式 is_(None)：== None 在 SQLAlchemy 里虽然也编译成 IS NULL，
+        # 但这里"未声明版本"是一个有意义的取值，写清楚免得被当成笔误改掉。
+        conditions.append(
+            EvaluationTask.skill_version.is_(None)
+            if skill_version is None
+            else EvaluationTask.skill_version == skill_version
+        )
+
     stmt = (
         select(EvaluationTask)
-        .where(
-            EvaluationTask.skill_id == skill_id,
-            EvaluationTask.tier == str(tier),
-            EvaluationTask.state == str(TaskState.QUEUED),
-        )
+        .where(*conditions)
         .order_by(EvaluationTask.created_at)
         .limit(1)
     )

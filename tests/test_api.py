@@ -107,6 +107,58 @@ def test_folding_refreshes_the_declared_version(client):
     assert task["skill_version"] == "2.1.0"
 
 
+@pytest.fixture
+def gitlab_client(tmp_path, monkeypatch, db_url):
+    """同 client，但配成 GitLab 接入——此时 skill_version 是 ref。"""
+    monkeypatch.setenv("SKILLPRISM_DATABASE_URL", db_url)
+    monkeypatch.setenv("SKILLPRISM_REPORT_ROOT", str(tmp_path / "reports"))
+    monkeypatch.setenv("SKILLPRISM_WORK_ROOT", str(tmp_path / "work"))
+    monkeypatch.setenv("SKILLPRISM_GITLAB_BASE_URL", "https://gitlab.internal")
+    reset_settings()
+    reset_engine()
+    init_db()
+
+    with TestClient(app) as c:
+        yield c
+    reset_engine()
+    reset_settings()
+
+
+def test_gitlab_mode_does_not_fold_across_refs(gitlab_client):
+    """GitLab 接入下 skill_version 是 ref，两个 ref 是两份内容。
+
+    折叠会让 v1 那次触发拿到 v2 的结论——和 find_queued 不折叠 running
+    任务是同一个错误，只不过错在版本维度上。
+    """
+    trigger = {"skill_id": "group/repo", "skill_name": "log-triage"}
+    first = gitlab_client.post(
+        "/api/evaluations", json={**trigger, "skill_version": "v1.0.0"}
+    ).json()
+    second = gitlab_client.post(
+        "/api/evaluations", json={**trigger, "skill_version": "v2.0.0"}
+    ).json()
+
+    assert second["deduplicated"] is False
+    assert second["task_id"] != first["task_id"]
+
+    # 同一个 ref 的重复触发仍然要收敛——触发接口天然会被重试。
+    again = gitlab_client.post(
+        "/api/evaluations", json={**trigger, "skill_version": "v1.0.0"}
+    ).json()
+    assert again["deduplicated"] is True
+    assert again["task_id"] == first["task_id"]
+
+
+def test_gitlab_mode_folds_when_no_ref_declared(gitlab_client):
+    """都不给 ref 就是都走默认分支，仍然是同一份内容，该折叠。"""
+    trigger = {"skill_id": "group/repo", "skill_name": "log-triage"}
+    first = gitlab_client.post("/api/evaluations", json=trigger).json()
+    second = gitlab_client.post("/api/evaluations", json=trigger).json()
+
+    assert second["deduplicated"] is True
+    assert second["task_id"] == first["task_id"]
+
+
 def test_force_bypasses_folding(client):
     """强制重跑是人为动作，不能被去重吃掉。"""
     first = client.post("/api/evaluations", json=TRIGGER).json()

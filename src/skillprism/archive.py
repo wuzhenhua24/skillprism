@@ -1,8 +1,9 @@
 """从 zip 归档解出 skill 文件。
 
-管理系统按一个 skill 一个 zip 的方式提供内容，因此解归档这一步落在我们
-这边，随之而来的一整类归档特有风险也归我们负责。物化层防的是**路径**，
-不是**归档格式**——以下四类它一个都挡不住：
+管理系统按一个 skill 一个 zip 的方式提供内容，GitLab 接入取的也是归档
+（见 ``content.GitLabArchiveSource`` 为什么不 clone），因此解归档这一步
+落在我们这边，随之而来的一整类归档特有风险也归我们负责。物化层防的是
+**路径**，不是**归档格式**——以下四类它一个都挡不住：
 
 1. **Zip slip**：条目名带 ``..`` 或绝对路径。（路径校验能挡，但必须真的
    把每个条目名都送进去校验，而不是直接 ``extractall``。）
@@ -71,33 +72,76 @@ def _is_regular_file(info: zipfile.ZipInfo) -> bool:
     return file_type == stat.S_IFREG
 
 
-def _strip_common_root(paths: list[str]) -> str | None:
-    """若所有条目都在同一个顶层目录下，返回该目录名。
-
-    管理系统打包时可能带一层以 skill 名命名的顶层目录
-    （``my-skill/SKILL.md``），也可能直接把文件放在根上（``SKILL.md``）。
-    两种都得支持，且不能靠猜——以 SKILL.md 的实际位置为准。
-    """
-    if any(p == SKILL_MANIFEST for p in paths):
-        return None  # 文件已在根上，不剥离
-
+def _single_top_level(paths: list[str]) -> str | None:
+    """所有条目共有的唯一顶层目录名；没有则返回 None。"""
     roots = {p.split("/", 1)[0] for p in paths if "/" in p}
     if len(roots) != 1:
         return None
     root = roots.pop()
     if any(not p.startswith(f"{root}/") for p in paths):
         return None
+    return root
+
+
+def _strip_common_root(paths: list[str]) -> str | None:
+    """若所有条目都在同一个顶层目录下，返回该目录名。
+
+    管理系统打包时可能带一层以 skill 名命名的顶层目录
+    （``my-skill/SKILL.md``），也可能直接把文件放在根上（``SKILL.md``）。
+    两种都得支持，且不能靠猜——以 SKILL.md 的实际位置为准。
+
+    只认一层。埋得更深的布局有多种解读，这里不猜——需要更深的前缀时由
+    调用方通过 ``subdir`` 明确声明，见 :func:`_prefix_for_subdir`。
+    """
+    if any(p == SKILL_MANIFEST for p in paths):
+        return None  # 文件已在根上，不剥离
+
+    root = _single_top_level(paths)
+    if root is None:
+        return None
     if f"{root}/{SKILL_MANIFEST}" not in paths:
         return None
     return root
 
 
-def read_skill_zip(data: bytes) -> list[SkillFile]:
+def _prefix_for_subdir(paths: list[str], subdir: str) -> str:
+    """调用方声明了 skill 在归档里的子目录时，算出要剥掉的前缀。
+
+    与 :func:`_strip_common_root` 的区别在于这里**不推断**：布局是调用方
+    给出的（GitLab 源知道自己按哪个 path 取的归档），对不上就报错，不去
+    试第二种解读。
+
+    只接受两种前缀：``<subdir>/``，以及带一层归档顶层目录的
+    ``<root>/<subdir>/``——后者是 Git 服务端打包的固定形态，顶层目录名
+    形如 ``<repo>-<ref>-<sha>``，含 sha，事先猜不出来。
+    """
+    candidates = []
+    root = _single_top_level(paths)
+    if root is not None:
+        candidates.append(f"{root}/{subdir}/")
+    candidates.append(f"{subdir}/")
+
+    for prefix in candidates:
+        if all(p.startswith(prefix) for p in paths):
+            return prefix
+
+    raise ArchiveError(
+        f"归档里没有声明的子目录 {subdir!r}（条目形如 {paths[0]!r}）"
+    )
+
+
+def read_skill_zip(data: bytes, *, subdir: str | None = None) -> list[SkillFile]:
     """把一个 skill 的 zip 解成文件列表。
+
+    ``subdir`` 声明 skill 在归档里的子目录。给了就按它剥前缀、对不上就报错；
+    不给则沿用"根上或单层顶层目录"的推断。这个口子是给 Git 归档用的：
+    那边的条目形如 ``<repo>-<ref>-<sha>/skills/foo/SKILL.md``，层级由调用方
+    的取档参数决定，不该由这里去猜。
 
     任何一条防线被触发就整体拒绝，不做部分解出——一个残缺的 skill 评出来
     的结果比评测失败更有害，因为它看起来是有效的。
     """
+    subdir = subdir.strip("/") if subdir else None
     try:
         archive = zipfile.ZipFile(io.BytesIO(data))
     except zipfile.BadZipFile as exc:
@@ -138,8 +182,12 @@ def read_skill_zip(data: bytes) -> list[SkillFile]:
             except UnsafePathError as exc:
                 raise ArchiveError(f"归档含不安全路径：{exc}") from exc
 
-        common_root = _strip_common_root(raw_paths)
-        paths = [p[len(common_root) + 1 :] if common_root else p for p in raw_paths]
+        if subdir:
+            prefix = _prefix_for_subdir(raw_paths, subdir)
+        else:
+            common_root = _strip_common_root(raw_paths)
+            prefix = f"{common_root}/" if common_root else ""
+        paths = [p[len(prefix) :] for p in raw_paths]
 
         seen: set[str] = set()
         for path in paths:
@@ -151,7 +199,8 @@ def read_skill_zip(data: bytes) -> list[SkillFile]:
             # 措辞要和"包损坏"区分开：内容下下来了、也解开了，只是它不是
             # 一个 skill。管理系统还托管 Commands / Agents / Hooks 等分类，
             # 那些包里本来就没有 SKILL.md，报"归档无法解出"会把人带偏。
-            raise ArchiveError(f"归档根目录缺少 {SKILL_MANIFEST}，不是一个可评测的 skill")
+            where = f"{subdir}/ 下" if subdir else "根目录"
+            raise ArchiveError(f"归档{where}缺少 {SKILL_MANIFEST}，不是一个可评测的 skill")
 
         files: list[SkillFile] = []
         actual_total = 0

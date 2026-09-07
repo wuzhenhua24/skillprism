@@ -50,6 +50,19 @@ class Settings(BaseSettings):
     #: 下载体积上限。解压前先卡住，避免拉一个超大响应体进内存。
     max_download_bytes: int = 64 * 1024 * 1024
 
+    # ---- 内容来源：GitLab 归档接口 ----
+    #: GitLab 实例地址，例 https://gitlab.internal。配了就走 GitLab 源，
+    #: 与 CONTENT_URL_TEMPLATE 互斥（见 content.build_content_source）。
+    gitlab_base_url: str = ""
+    #: 只读令牌。权限给到 read_repository 即可，不要给 api。
+    #: 不要放进 SCANNER_ENV——那是注给评测子进程的，公司凭据不进那一层。
+    gitlab_token: str = ""
+    #: 发令牌用的请求头名。PAT / group / project token 用 PRIVATE-TOKEN，
+    #: CI 的 CI_JOB_TOKEN 只认 JOB-TOKEN，OAuth token 用 Authorization。
+    gitlab_token_header: str = "PRIVATE-TOKEN"
+    #: 提交时没给 skill_version 就用这个 ref。
+    gitlab_default_ref: str = "main"
+
     #: SkillEvaluator CLI 的可执行文件。独立安装，不与本服务共用 venv——
     #: 上游有 litellm<1.89、harbor==0.13.2 等硬 pin，共用早晚会冲突。
     skillevaluator_bin: str = "skillevaluator"
@@ -95,12 +108,44 @@ class Settings(BaseSettings):
     shim_retries: int = 3
     shim_timeout_seconds: float = 120.0
 
+    @field_validator("gitlab_base_url")
+    @classmethod
+    def _gitlab_base_url_is_http(cls, value: str) -> str:
+        """启动时就挡住写错的地址，别等到第一个任务跑起来才发现。"""
+        if not value:
+            return value
+        if not value.startswith(("http://", "https://")):
+            raise ValueError(f"SKILLPRISM_GITLAB_BASE_URL 必须是 http(s) 地址：{value!r}")
+        return value.rstrip("/")
+
+    @field_validator("gitlab_token_header")
+    @classmethod
+    def _gitlab_token_header_is_a_header_name(cls, value: str) -> str:
+        value = value.strip()
+        if not value or any(ord(ch) < 0x21 or ord(ch) > 0x7E or ch == ":" for ch in value):
+            raise ValueError(f"SKILLPRISM_GITLAB_TOKEN_HEADER 不是合法的请求头名：{value!r}")
+        return value
+
     @field_validator("scanner_env")
     @classmethod
     def _scanner_env_is_parseable(cls, value: str) -> str:
         """启动时就校验格式。写错了要当场报错，不能到评测时才静默丢掉。"""
         parse_scanner_env(value)
         return value
+
+    @property
+    def version_selects_content(self) -> bool:
+        """``skill_version`` 是否决定取到的是哪份内容。
+
+        zip 接入下它是用户上传时手填的标签，内容由 ``skill_id`` 决定，
+        同一个 skill 换个版本号仍然取到同一份内容；GitLab 接入下它是 ref，
+        直接决定取到哪个 commit。
+
+        排队去重的键因此不同：前者可以把新触发折叠进旧任务并刷新版本标签，
+        后者这么做等于宣称评了 v1、给出的却是 v2 的结论。见
+        :func:`skillprism.queue.find_queued`。
+        """
+        return bool(self.gitlab_base_url)
 
     def scanner_env_pairs(self) -> dict[str, str]:
         return parse_scanner_env(self.scanner_env)

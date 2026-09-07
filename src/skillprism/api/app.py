@@ -79,7 +79,11 @@ def submit_evaluation(
     if request.tier not in service.IMPLEMENTED_TIERS:
         raise HTTPException(status_code=501, detail=f"{request.tier} 尚未实现，当前仅支持 tier1")
     try:
-        return service.submit(session, request)
+        return service.submit(
+            session,
+            request,
+            version_selects_content=get_settings().version_selects_content,
+        )
     except (UnsafePathError, MaterializeError) as exc:
         # 只可能来自 skill_name 校验：这个字段是调用方直接给的，当场就能改。
         raise HTTPException(status_code=422, detail=str(exc)) from exc

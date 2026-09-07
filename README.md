@@ -76,7 +76,7 @@ worker 另起一个进程：
 | `runner.py` | 子进程调用 skillevaluator CLI，启动自检，退出码语义 |
 | `adapter.py` | 上游 JSON → 本服务 DTO。**唯一了解上游 schema 的模块** |
 | `schemas.py` | 对外契约。管理系统只看这一层 |
-| `content.py` | 内容来源协议。接入时替换实现 |
+| `content.py` | 内容来源协议。已有三种实现：本地目录 / 管理系统 zip / GitLab 归档 |
 | `storage.py` | 报告存储协议。生产替换为对象存储 |
 | `queue.py` / `worker.py` | 任务队列与处理循环 |
 | `repository.py` / `models.py` | 持久化 |
@@ -320,6 +320,55 @@ SKILLPRISM_CONTENT_TOKEN=<服务令牌>
 
 只有 **worker** 需要能访问管理系统，API 进程不需要。这是刻意的隔离，
 部署时可以据此收紧网络策略。
+
+### 内容来源之二：skill 存在 GitLab 上
+
+另一种接入是 skill 文件放在 GitLab 仓库里。配 GitLab 地址即可切换，
+与上面的 zip 模板**互斥**（两个都配会在启动内容源时直接报错）：
+
+```bash
+SKILLPRISM_GITLAB_BASE_URL=https://gitlab.internal
+SKILLPRISM_GITLAB_TOKEN=<只读令牌>
+SKILLPRISM_GITLAB_TOKEN_HEADER=PRIVATE-TOKEN   # CI job token 改成 JOB-TOKEN
+SKILLPRISM_GITLAB_DEFAULT_REF=main
+```
+
+**走归档接口，不 clone。** 取的是
+`GET /api/v4/projects/:id/repository/archive.zip?sha=&path=`，拿到的仍然是
+一个 zip，`archive.py` 那四道防线（zip slip、解压炸弹、符号链接、重复条目）
+原样继续生效。clone 的话它们全部作废，还要额外面对 `.git/hooks`、
+`.gitattributes` 的 filter driver、submodule 和没有上限的仓库体积——
+物化层的路径校验挡不住其中任何一样，因为它们的路径本身合法。
+
+**触发时怎么指定一个 skill。** 不动对外契约，把两个部分编进现有字段：
+
+| 字段 | GitLab 接入下的含义 | 例 |
+| --- | --- | --- |
+| `skill_id` | `<项目路径>[:<仓库内子目录>]`，项目位置也接受数字项目 ID | `group/repo`、`group/repo:skills/log-triage`、`42:skills/foo` |
+| `skill_version` | git ref（分支 / tag / commit sha），留空用 `DEFAULT_REF` | `v1.2.0`、`main`、40 位 sha |
+
+冒号做分隔不会有歧义：GitLab 的项目路径只允许字母数字与 `_ - . /`。
+带子目录时会把它作为 `path=` 传给归档接口，**只取那一个子树**——整仓取档
+很容易撞上 512 条目 / 32MB 的上限，还会把同仓其他 skill 算进 `content_hash`。
+
+Git 服务端打的包形如 `<repo>-<ref>-<sha>/<子目录>/SKILL.md`，前缀含 sha、
+事先猜不出来，所以 `read_skill_zip` 多了个 `subdir` 参数：调用方声明布局，
+对不上就报错，不去猜第二种解读。没有 `subdir` 时仍是原来的推断规则
+（根上，或单层顶层目录），埋两层以上照旧拒收。
+
+**`skill_version` 的语义在两种接入下不同**，去重键也因此不同。zip 接入下它
+是用户手填的标签、内容由 `skill_id` 决定，排队中换个版本号会折叠进同一条
+任务并刷新标签；GitLab 接入下它是 ref，两个 ref 是两份内容，折叠等于宣称评
+了 v1 却给出 v2 的结论，所以版本进去重键。开关是 `Settings.version_selects_content`，
+由 `test_gitlab_mode_does_not_fold_across_refs` 钉住。
+
+**404 的坑。** GitLab 对"有令牌但无权限"的项目也返回 404 而不是 403（防项目
+枚举），而 404 在我们这里是不重试的终结态。所以令牌权限配漏了，表现是"这个
+skill 不存在"。错误文案已经把两种可能都写上了，排查时先验令牌。
+令牌过期是 401，归在可重试一侧——那要靠运维改配置，重试窗口正好留给这个修复。
+
+令牌只需要 `read_repository`，不要给 `api`。**不要**把它放进
+`SKILLPRISM_SCANNER_ENV`——那是注给评测子进程的，公司凭据不进那一层。
 
 ### 结果怎么回去
 
