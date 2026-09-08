@@ -41,6 +41,8 @@ class Settings(BaseSettings):
     local_skills_root: Path = Path("./var/skills")
 
     # ---- 内容来源：管理系统的 zip 下载接口 ----
+    # 与下面的 GitLab 接入可以同时配，两个都配就两种接入都启用；触发时由
+    # 各自的入口声明用哪个（见 content.enabled_sources）。
     #: 下载地址模板，{skill_id} 会被 URL 编码后替换。
     #: 例：https://skills.internal/api/skills/{skill_id}/download
     content_url_template: str = ""
@@ -57,8 +59,8 @@ class Settings(BaseSettings):
     public_base_url: str = ""
 
     # ---- 内容来源：GitLab 归档接口 ----
-    #: GitLab 实例地址，例 https://gitlab.internal。配了就走 GitLab 源，
-    #: 与 CONTENT_URL_TEMPLATE 互斥（见 content.resolve_source_kind）。
+    #: GitLab 实例地址，例 https://gitlab.internal。配了就启用 GitLab 接入。
+    #: 可以和 CONTENT_URL_TEMPLATE 同时配，见 content.enabled_sources。
     gitlab_base_url: str = ""
     #: 只读令牌。权限给到 read_repository 即可，不要给 api。
     #: 不要放进 SCANNER_ENV——那是注给评测子进程的，公司凭据不进那一层。

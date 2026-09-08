@@ -177,6 +177,13 @@ SKILLPRISM_CONTENT_URL_TEMPLATE=
 SKILLPRISM_CONTENT_TOKEN=
 SKILLPRISM_CONTENT_TIMEOUT_SECONDS=60
 SKILLPRISM_MAX_DOWNLOAD_BYTES=67108864
+
+# 内容来源：skill 存在 GitLab 上。和上面的 zip 接入可以同时配，
+# 两个都配就两种接入都在线，触发时各走各的入口
+SKILLPRISM_GITLAB_BASE_URL=
+SKILLPRISM_GITLAB_TOKEN=
+SKILLPRISM_GITLAB_TOKEN_HEADER=PRIVATE-TOKEN
+SKILLPRISM_GITLAB_DEFAULT_REF=main
 EOF
 
 sudo chown root:skillprism /etc/skillprism/service.env
@@ -244,7 +251,13 @@ curl -s http://127.0.0.1:8000/api/skills/<skill_id>/evaluation | python3 -m json
 管理系统重启一次就不止几秒，没有退避的话三次尝试会在一个轮询周期内烧光，
 上游的短暂故障会变成任务的永久失败。
 
-`SKILLPRISM_LOCAL_SKILLS_ROOT` 只在 `SKILLPRISM_CONTENT_URL_TEMPLATE` 为空时生效，
+**两种接入可以同时启用**，各走各的入口：`POST /api/evaluations/zip` 与
+`POST /api/evaluations/gitlab`。两种都在线时，查询要带 `?source=zip|gitlab`，
+不带返回 400——`skill_id` 只在一个来源内部唯一（见 README「内容来源是身份的
+一部分」）。保留通道 `POST /api/evaluations` 在只启用一种时行为不变。
+
+`SKILLPRISM_LOCAL_SKILLS_ROOT` 只在 `CONTENT_URL_TEMPLATE` 与 `GITLAB_BASE_URL`
+都为空时生效，
 是第七节冒烟测试走的那条路。**必须显式给**：它的默认值是相对路径 `./var/skills`，
 会跟着 unit 里的 `WorkingDirectory` 落到 `/opt/skillprism/var/skills`，而数据都在
 `/var/lib/skillprism` 下——不设它，第七节建的 demo 目录 worker 根本看不到。

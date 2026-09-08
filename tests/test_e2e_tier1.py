@@ -134,7 +134,9 @@ def _evaluate(
         )
 
     assert run_once(
-        settings=settings, content_source=source, storage=storage
+        settings=settings,
+        content_sources={ContentSource.LOCAL: source},
+        storage=storage,
     ), "worker 没有取到任务"
 
     with session_scope() as db:
@@ -368,7 +370,9 @@ def test_missing_skill_fails_task_without_result(env):
         task_id = task.id
 
     run_once(
-        settings=env, content_source=source, storage=LocalReportStorage(env.report_root)
+        settings=env,
+        content_sources={ContentSource.LOCAL: source},
+        storage=LocalReportStorage(env.report_root),
     )
 
     with session_scope() as db:

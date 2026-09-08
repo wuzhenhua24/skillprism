@@ -12,11 +12,17 @@ from urllib.parse import quote, urlencode
 from sqlalchemy.orm import Session
 
 from skillprism import queue as task_queue
+from skillprism.content import join_skill_id, validate_ref
 from skillprism.domain import ContentSource, Tier
 from skillprism.materialize import MaterializeError, safe_relative_path
 from skillprism.models import EvaluationResult
 from skillprism.repository import find_result, latest_result, result_to_dto
-from skillprism.schemas import EvaluationDTO, SubmitRequest, SubmitResponse
+from skillprism.schemas import (
+    EvaluationDTO,
+    GitLabSubmitRequest,
+    SubmitRequest,
+    SubmitResponse,
+)
 
 
 def validate_skill_name(name: str) -> None:
@@ -29,6 +35,32 @@ def validate_skill_name(name: str) -> None:
     """
     if len(safe_relative_path(name).parts) != 1:
         raise MaterializeError(f"skill_name 必须是单段名字，不能含路径分隔符：{name!r}")
+
+
+def to_submit_request(request: GitLabSubmitRequest) -> SubmitRequest:
+    """把 GitLab 那组字段折进内部的 ``skill_id`` / ``skill_version``。
+
+    编码规则（``项目[:子目录]``、ref 当版本）只活在这一层以内：对外是三个
+    各自命名的字段，对内是队列和结果表里那两列。落库的形态不变，是有意的
+    ——已有的结论、查询与报告地址都按那两列寻址。
+
+    校验放在这里而不是留给 worker：项目路径、子目录、ref 写错了重试多少次
+    都一样，当场 422 比十秒后一条失败任务好查得多。
+
+    抛 :class:`~skillprism.content.SkillNotFoundError`（内容层用它表示"这个
+    标识不成立"），由 API 层翻成 422。
+    """
+    return SubmitRequest(
+        skill_id=join_skill_id(request.project, request.subdir),
+        skill_name=request.skill_name,
+        # 留空是合法的：worker 那边会用 GITLAB_DEFAULT_REF。这里不把默认值
+        # 提前填进去——填了的话去重键上"没指定 ref"和"显式写了 main"就成了
+        # 两个不同的值，而它们其实指同一份内容。
+        skill_version=validate_ref(request.ref) if request.ref else None,
+        tier=request.tier,
+        force=request.force,
+        bundle=request.bundle,
+    )
 
 
 def submit(
@@ -134,7 +166,7 @@ def lookup_result(
 def report_url_for(row: EvaluationResult, public_base_url: str) -> str | None:
     """这条结论的 HTML 报告的公开地址。
 
-    **一定带上 content_hash。** 不带的话链接的含义是"这个 skill 最近评完的
+    **一定带上 source 与 content_hash。** 不带的话链接的含义是"这个 skill 最近评完的
     那条"，会随后续评测漂走——GitLab 接入下 skill_id 是长期不变的仓库路径，
     多个 ref 的结论堆在同一个 ID 下（同一条理由见 :func:`lookup_result`）。
     链接一旦回给管理系统就会进它们的库、长期存在，那时"指错版本"比现在
@@ -149,7 +181,9 @@ def report_url_for(row: EvaluationResult, public_base_url: str) -> str | None:
     # ``{skill_id:path}``，斜杠必须保留字面量；``:`` 在路径段里合法，一并
     # 放行。其余照常编码——一个没编码的 ``?`` 或 ``#`` 会把后面的查询串截掉。
     path = quote(row.skill_id, safe="/:")
-    query = urlencode({"content_hash": row.content_hash})
+    # source 必须进链接：两种接入的 skill_id 是两个命名空间，只带
+    # content_hash 的话，同名 ID 在另一个来源下也存在时会取到那一条。
+    query = urlencode({"source": row.source, "content_hash": row.content_hash})
     return f"{public_base_url.rstrip('/')}/api/skills/{path}/report?{query}"
 
 

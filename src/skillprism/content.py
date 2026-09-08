@@ -258,6 +258,21 @@ def split_skill_id(skill_id: str) -> tuple[str, str | None]:
     return project, subdir
 
 
+def join_skill_id(project: str, subdir: str | None) -> str:
+    """把 (项目, 子目录) 拼成内部用的 ``skill_id``，:func:`split_skill_id` 的逆。
+
+    对外接口收的是 ``project`` 与 ``subdir`` 两个字段，拼装由服务端做——
+    冒号编码是内部约定，不该要求调用方懂。拼完立刻用 ``split_skill_id``
+    校验一遍：写错的项目路径或子目录在提交时就报 422，而不是十秒后变成一条
+    "取不到内容"的任务错误。
+    """
+    raw = project.strip().strip("/")
+    if subdir and subdir.strip().strip("/"):
+        raw = f"{raw}{SUBDIR_SEPARATOR}{subdir.strip().strip('/')}"
+    split_skill_id(raw)
+    return raw
+
+
 def validate_ref(ref: str) -> str:
     """校验 git ref。写错的 ref 重试多少次都一样，所以当作"不存在"处理。"""
     candidate = ref.strip()
@@ -379,37 +394,35 @@ class GitLabArchiveSource:
         return project, ref, subdir, data
 
 
-def resolve_source_kind(settings) -> ContentSource:
-    """按配置判定本部署走哪种内容来源。
+def enabled_sources(settings) -> tuple[ContentSource, ...]:
+    """本部署启用了哪些内容来源。
 
-    配了 ``SKILLPRISM_GITLAB_BASE_URL`` 是 GitLab 归档接口，配了
-    ``SKILLPRISM_CONTENT_URL_TEMPLATE`` 是管理系统的 zip 下载接口，
-    都没配则是本地目录——后者只用于开发调试。
+    配了 ``SKILLPRISM_CONTENT_URL_TEMPLATE`` 就启用 zip 接入，配了
+    ``SKILLPRISM_GITLAB_BASE_URL`` 就启用 GitLab 接入，**两个都配就两个都
+    启用**。都没配则退回本地目录，那只用于开发调试。
 
-    两个都配是配置写错了，当场报错而不是挑一个：两种接入对
-    ``skill_id`` / ``skill_version`` 的解释不一样，选错了不会报错，只会
-    默默评错东西。
-
-    判定单独抽出来，是因为**不止 worker 需要它**：提交路径要把来源写进任务
-    （它是身份的一部分，见 :class:`~skillprism.domain.ContentSource`），
-    查询路径要按来源定位结论。三处各判一次早晚会分叉，那种分叉的表现正是
-    "结论存在 A 名下、查询去 B 名下找"。
+    两者曾经互斥，因为那时一次触发说不清自己是哪种接入：``skill_id`` 和
+    ``skill_version`` 在两边的含义不同，服务端只能按进程配置猜一个，猜错
+    不会报错、只会默默评错东西。现在来源由入口声明、随任务落库
+    （见 :class:`~skillprism.domain.ContentSource`），互斥的理由就没有了。
     """
-    if settings.gitlab_base_url and settings.content_url_template:
-        raise ValueError(
-            "SKILLPRISM_GITLAB_BASE_URL 与 SKILLPRISM_CONTENT_URL_TEMPLATE "
-            "只能配一个：两者对 skill_id/skill_version 的解释不同"
-        )
-    if settings.gitlab_base_url:
-        return ContentSource.GITLAB
+    kinds = []
     if settings.content_url_template:
-        return ContentSource.ZIP
-    return ContentSource.LOCAL
+        kinds.append(ContentSource.ZIP)
+    if settings.gitlab_base_url:
+        kinds.append(ContentSource.GITLAB)
+    return tuple(kinds) if kinds else (ContentSource.LOCAL,)
 
 
-def build_content_source(settings) -> SkillContentSource:
-    """按配置造出内容来源的客户端。来源判定见 :func:`resolve_source_kind`。"""
-    kind = resolve_source_kind(settings)
+def build_content_sources(settings) -> dict[ContentSource, SkillContentSource]:
+    """按配置造出所有启用了的内容来源客户端，按来源索引。
+
+    worker 拿着这张表按 ``task.source`` 取实现，而不是全局只有一个客户端。
+    """
+    return {kind: _build_one(settings, kind) for kind in enabled_sources(settings)}
+
+
+def _build_one(settings, kind: ContentSource) -> SkillContentSource:
     if kind is ContentSource.GITLAB:
         return GitLabArchiveSource(
             settings.gitlab_base_url,

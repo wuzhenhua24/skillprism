@@ -246,7 +246,7 @@ def test_report_url_pins_the_hash_of_the_row_it_came_with(client, public_domain,
     assert dto["content_hash"] == "hash-main"
     assert dto["report_url"] == (
         f"{PUBLIC_BASE_URL}/api/skills/group/repo:skills/log-triage"
-        "/report?content_hash=hash-main"
+        "/report?source=local&content_hash=hash-main"
     )
 
 

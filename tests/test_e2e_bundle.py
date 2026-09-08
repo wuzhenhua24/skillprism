@@ -118,7 +118,9 @@ def _run(settings, request: SubmitRequest) -> None:
     with session_scope() as db:
         submit(db, request, source=ContentSource.LOCAL)
     assert run_once(
-        settings=settings, content_source=source, storage=storage
+        settings=settings,
+        content_sources={ContentSource.LOCAL: source},
+        storage=storage,
     ), "worker 没有取到任务"
 
 

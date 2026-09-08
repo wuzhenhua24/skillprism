@@ -216,8 +216,10 @@ skillevaluator validate <skill 目录> --policy ./profiles/internal.yaml -r cli
 
 ### 触发接口
 
+**每种接入一个入口**，请求体各用各的字段：
+
 ```http
-POST /api/evaluations
+POST /api/evaluations/zip
 ```
 
 ```json
@@ -230,7 +232,44 @@ POST /api/evaluations
 }
 ```
 
-回 `202` 与 `{task_id, skill_id, state, deduplicated}`。三条语义要说清：
+```http
+POST /api/evaluations/gitlab
+```
+
+```json
+{
+  "project": "group/repo",
+  "subdir": "skills/log-triage",
+  "ref": "v1.2.0",
+  "skill_name": "log-triage",
+  "bundle": false
+}
+```
+
+两边都回 `202` 与 `{task_id, skill_id, state, deduplicated}`。
+
+**为什么分两个入口。** 两种接入对"哪个 skill"和"哪个版本"的解释不同：zip 下
+`skill_id` 是管理系统的资源 ID、`skill_version` 是用户手填的标签；GitLab 下
+位置是 (项目, 仓库内子目录)、版本是 git ref。塞进同一组字段的话，服务端只能
+按进程配置猜是哪一种——猜错不会报错，只会默默评错东西。入口把这件事变成
+调用方的声明。
+
+顺带换来一件事：GitLab 侧的项目路径、子目录、ref 在**提交时**就校验，写错
+当场 `422`。编码成一个 `skill_id` 字符串时，这些错要等 worker 去取内容才
+暴露，表现成一条十秒后失败的任务。
+
+`project` + `subdir` 在内部仍拼成 `项目[:子目录]` 存进 `skill_id`，`ref` 存进
+`skill_version`——落库形态不变是有意的，已有的结论、查询与报告地址都按那两列
+寻址。冒号编码从此只是内部约定，不再要求调用方懂。
+
+**保留通道 `POST /api/evaluations`** 收 zip 那个形状的请求体，在只启用了一种
+接入时按那一种解释（GitLab 接入下 `skill_id` 仍是 `项目[:子目录]`、
+`skill_version` 仍是 ref，与拆分之前完全一致）。两种都启用时它说不清是哪一种，
+返回 `400` 要求改用具名入口。已经在用它的管理系统不必立刻改。
+
+没启用的接入其入口返回 `409`——收了也没人跑，任务会一直排在队列里。
+
+下面三条语义两个入口都适用：
 
 **`skill_name` 是必填的，不能省。** 物化目录用它命名，SkillEvaluator 的
 `SCHEMA.name_consistency`（HIGH）会拿目录名和 frontmatter 的 `name` 比对。
@@ -323,8 +362,8 @@ SKILLPRISM_CONTENT_TOKEN=<服务令牌>
 
 ### 内容来源之二：skill 存在 GitLab 上
 
-另一种接入是 skill 文件放在 GitLab 仓库里。配 GitLab 地址即可切换，
-与上面的 zip 模板**互斥**（两个都配会在启动内容源时直接报错）：
+另一种接入是 skill 文件放在 GitLab 仓库里。配 GitLab 地址即可启用，
+**可以和上面的 zip 模板同时配**——两个都配就两种接入都在线，各走各的入口：
 
 ```bash
 SKILLPRISM_GITLAB_BASE_URL=https://gitlab.internal
@@ -340,16 +379,22 @@ SKILLPRISM_GITLAB_DEFAULT_REF=main
 `.gitattributes` 的 filter driver、submodule 和没有上限的仓库体积——
 物化层的路径校验挡不住其中任何一样，因为它们的路径本身合法。
 
-**触发时怎么指定一个 skill。** 不动对外契约，把两个部分编进现有字段：
+**触发时怎么指定一个 skill。** 走 `POST /api/evaluations/gitlab`，三个字段
+各自命名：
 
-| 字段 | GitLab 接入下的含义 | 例 |
+| 字段 | 含义 | 例 |
 | --- | --- | --- |
-| `skill_id` | `<项目路径>[:<仓库内子目录>]`，项目位置也接受数字项目 ID | `group/repo`、`group/repo:skills/log-triage`、`42:skills/foo` |
-| `skill_version` | git ref（分支 / tag / commit sha），留空用 `DEFAULT_REF` | `v1.2.0`、`main`、40 位 sha |
+| `project` | 项目路径，也接受数字项目 ID | `group/repo`、`42` |
+| `subdir` | 仓库内子目录，留空表示 SKILL.md 在仓库根 | `skills/log-triage` |
+| `ref` | git ref（分支 / tag / commit sha），留空用 `DEFAULT_REF` | `v1.2.0`、`main`、40 位 sha |
 
-冒号做分隔不会有歧义：GitLab 的项目路径只允许字母数字与 `_ - . /`。
-带子目录时会把它作为 `path=` 传给归档接口，**只取那一个子树**——整仓取档
-很容易撞上 512 条目 / 32MB 的上限，还会把同仓其他 skill 算进 `content_hash`。
+内部拼成 `项目[:子目录]` 存进 `skill_id`。冒号做分隔不会有歧义：GitLab 的
+项目路径只允许字母数字与 `_ - . /`。带子目录时会把它作为 `path=` 传给归档
+接口，**只取那一个子树**——整仓取档很容易撞上 512 条目 / 32MB 的上限，还会
+把同仓其他 skill 算进 `content_hash`。
+
+`ref` 留空时**不在提交侧补成 `DEFAULT_REF`**：补了的话"没指定"和"显式写了
+main"在去重键上就是两个值，而它们指的是同一份内容。默认值由取内容那一层用。
 
 Git 服务端打的包形如 `<repo>-<ref>-<sha>/<子目录>/SKILL.md`，前缀含 sha、
 事先猜不出来，所以 `read_skill_zip` 多了个 `subdir` 参数：调用方声明布局，
@@ -360,13 +405,13 @@ Git 服务端打的包形如 `<repo>-<ref>-<sha>/<子目录>/SKILL.md`，前缀�
 `agents/`、`hooks/`）不需要额外支持，`skills/` 底下正好就是 bundle 认的
 布局。要点是 `skill_id` **指到 `skills` 那一层**，不是仓库根：
 
-| plugin 仓形态 | `skill_id` | `bundle` |
+| plugin 仓形态 | `subdir` | `bundle` |
 | --- | --- | --- |
-| 单 plugin 仓（根上 `.claude-plugin/`） | `group/repo:skills` | `true` |
-| marketplace monorepo | `group/repo:plugins/<plugin>/skills` | `true` |
-| 只评其中一个 skill | `group/repo:skills/<name>` | `false` |
+| 单 plugin 仓（根上 `.claude-plugin/`） | `skills` | `true` |
+| marketplace monorepo | `plugins/<plugin>/skills` | `true` |
+| 只评其中一个 skill | `skills/<name>` | `false` |
 
-指到仓库根会失败，因为 skill 埋在二级。这个错误在 plugin 场景下是必然会
+`subdir` 留空（指到仓库根）会失败，因为 skill 埋在二级。这个错误在 plugin 场景下是必然会
 撞上的，所以 `_no_members_error` 会把归档里能当 catalog 根的子目录列出来
 （识别到 `.claude-plugin/` 时明说这是 plugin 仓）。**只改文案，不自动认
 `skills/`**——布局由调用方声明、对不上就报错是解归档这一层的前提，自动推断
@@ -381,10 +426,10 @@ Git 服务端打的包形如 `<repo>-<ref>-<sha>/<子目录>/SKILL.md`，前缀�
 `${CLAUDE_PLUGIN_ROOT}/scripts/foo.py` 这类写法很常见，它是路径样式文本，
 正好撞上前面记的那类 SkillSpector 噪声。
 
-**`skill_version` 的语义在两种接入下不同**，去重键也因此不同。zip 接入下它
+**版本的语义在两种接入下不同**，去重键也因此不同。zip 接入下 `skill_version`
 是用户手填的标签、内容由 `skill_id` 决定，排队中换个版本号会折叠进同一条
-任务并刷新标签；GitLab 接入下它是 ref，两个 ref 是两份内容，折叠等于宣称评
-了 v1 却给出 v2 的结论，所以版本进去重键。开关是
+任务并刷新标签；GitLab 接入下 `ref` 决定取哪个 commit，两个 ref 是两份内容，
+折叠等于宣称评了 v1 却给出 v2 的结论，所以版本进去重键。开关是
 `ContentSource.version_selects_content`——它挂在**来源**上而不是配置上，
 由 `test_gitlab_mode_does_not_fold_across_refs` 钉住。
 
@@ -417,9 +462,16 @@ skill 不存在"。错误文案已经把两种可能都写上了，排查时先�
 会带着原因失败，而不是拿当前的客户端照跑——两边都可能"取得到东西"，照跑
 的结果是一份看起来正常的错结论。
 
-当前一个进程仍然只启用一种接入（两个都配会在启动时报错）。这一列是为
-"zip 与 GitLab 各走一个接口、同时在线"准备的：那时提交侧由入口声明来源，
-查询侧由 `?source=` 给出。
+**查询侧用 `?source=` 指明命名空间**，`/evaluation` 与 `/report` 都是。只启用
+一种接入时可以省略；两种都启用时省了就返回 `400`——挑一个当默认不会报错，
+只会取到另一个接入下同名的那条。`report_url` 里也带着它。
+
+查询**不要求**那个来源当前还启用着：接入可以停掉，停掉之前评出来的结论还在
+库里，仍然该查得到。
+
+worker 按 `task.source` 选内容来源客户端，不看当前配置。任务声明的接入在这个
+worker 上没启用时（配置在排队之后被改过），任务带着原因失败而不是拿另一个
+客户端照跑——两边都可能"取得到东西"，照跑的结果是一份看起来正常的错结论。
 
 ### 结果怎么回去
 

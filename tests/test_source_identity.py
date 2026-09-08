@@ -16,6 +16,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from skillprism.config import get_settings, reset_settings
+from skillprism.content import SkillNotFoundError
 from skillprism.db import init_db, reset_engine, session_scope
 from skillprism.domain import ContentSource, EvaluationStatus, TaskState, Tier
 from skillprism.models import Base, EvaluationTask
@@ -166,18 +167,55 @@ def env(tmp_path, monkeypatch, db_url):
     reset_settings()
 
 
-def test_worker_refuses_a_task_from_another_source(env):
-    """配置在排队之后被改过时，任务作废而不是照跑。
+class RecordingSource:
+    """记下自己被问过哪些 skill_id 的内容来源。"""
 
-    worker 手上只有一个内容来源客户端。拿它去跑一条属于别的来源的任务，
-    就是去错的地方按错的解释取内容——而两边都可能"取得到"。
+    def __init__(self, label: str) -> None:
+        self.label = label
+        self.asked: list[str] = []
+
+    def fetch(self, skill_id, version=None):
+        self.asked.append(skill_id)
+        raise SkillNotFoundError(f"{self.label} 上没有 {skill_id}")
+
+    def fetch_bundle(self, skill_id, version=None):
+        return self.fetch(skill_id)
+
+
+def test_worker_routes_each_task_to_its_own_source(env):
+    """两种接入同时在线时，每条任务按自己记的来源取内容。
+
+    路由错了不会报错：两边的 skill_id 都可能"取得到东西"，评出来的是一份
+    看起来完全正常的错结论。
+    """
+    with session_scope() as db:
+        enqueue(db, source=ContentSource.ZIP, skill_id=COLLIDING_ID, skill_name="a")
+        enqueue(db, source=ContentSource.GITLAB, skill_id=COLLIDING_ID, skill_name="a")
+
+    zip_source = RecordingSource("zip")
+    gitlab_source = RecordingSource("gitlab")
+    sources = {ContentSource.ZIP: zip_source, ContentSource.GITLAB: gitlab_source}
+    storage = LocalReportStorage(env.report_root)
+
+    assert run_once(settings=env, content_sources=sources, storage=storage)
+    assert run_once(settings=env, content_sources=sources, storage=storage)
+
+    assert zip_source.asked == [COLLIDING_ID]
+    assert gitlab_source.asked == [COLLIDING_ID]
+
+
+def test_worker_refuses_a_task_whose_source_is_not_enabled(env):
+    """任务声明的接入在本 worker 上没启用时，任务作废而不是拿别的客户端跑。
+
+    这会在配置排队之后被改过时发生。拿另一个客户端去取就是去错的地方按错的
+    解释取内容——而两边都可能"取得到"。
     """
     with session_scope() as db:
         enqueue(db, source=ContentSource.ZIP, skill_id="2000705", skill_name="demo")
 
     run_once(
         settings=env,
-        content_source=NeverCalled(),
+        content_sources={ContentSource.LOCAL: NeverCalled()},
         storage=LocalReportStorage(env.report_root),
     )
 
@@ -186,3 +224,21 @@ def test_worker_refuses_a_task_from_another_source(env):
         assert task.state == str(TaskState.FAILED), "不该重试：换配置前排的队再试多少次都一样"
         assert "zip" in task.error and "local" in task.error
         assert lookup_result(db, ContentSource.ZIP, "2000705") is None
+
+
+def test_worker_refuses_a_task_with_an_unreadable_source(env):
+    """来源列上是个认不出的值时也当场终结，而不是当成某个默认来源跑。"""
+    with session_scope() as db:
+        task = enqueue(db, source=ContentSource.LOCAL, skill_id="2000705", skill_name="demo")
+        task.source = "svn"
+
+    run_once(
+        settings=env,
+        content_sources={ContentSource.LOCAL: NeverCalled()},
+        storage=LocalReportStorage(env.report_root),
+    )
+
+    with session_scope() as db:
+        task = db.query(EvaluationTask).one()
+        assert task.state == str(TaskState.FAILED)
+        assert "svn" in task.error

@@ -21,8 +21,7 @@ from skillprism.content import (
     ContentFetchError,
     SkillContentSource,
     SkillNotFoundError,
-    build_content_source,
-    resolve_source_kind,
+    build_content_sources,
 )
 from skillprism.db import SCHEMA_NOT_READY_HINT, schema_is_ready, session_scope
 from skillprism.domain import ContentSource, EvaluationStatus
@@ -54,22 +53,33 @@ def process_task(
     task: EvaluationTask,
     *,
     settings: Settings,
-    content_source: SkillContentSource,
+    content_sources: dict[ContentSource, SkillContentSource],
     storage: ReportStorage,
     evaluator_version: str | None = None,
 ) -> EvaluationStatus:
-    """处理一个任务。返回最终对外状态。"""
-    source = resolve_source_kind(settings)
-    if task.source != str(source):
-        # 这条任务是在另一种接入下排的。本 worker 手上只有一个内容来源客户端，
-        # 照跑就是去错的地方取内容——而两边的 skill_id 都可能"取得到"，
+    """处理一个任务。返回最终对外状态。
+
+    内容来源按 ``task.source`` 取，不看当前配置：任务属于它入队时声明的那个
+    接入，而两种接入对 ``skill_id`` 的解释不同。
+    """
+    try:
+        source = ContentSource(task.source)
+    except ValueError:
+        task_queue.finish(session, task, error=f"任务的来源取值无法识别：{task.source!r}")
+        return EvaluationStatus.ERROR
+
+    content_source = content_sources.get(source)
+    if content_source is None:
+        # 这条任务声明的接入在本 worker 上没启用。拿另一个客户端去跑就是去
+        # 错的地方按错的解释取内容——而两边的 skill_id 都可能"取得到"，
         # 于是评出一份看起来正常的错结论。宁可让它带着原因失败。
         task_queue.finish(
             session,
             task,
             error=(
-                f"任务来源是 {task.source}，本 worker 配置的来源是 {source}："
-                "内容来源在排队之后被改过，这条任务作废，请按原来源重新触发"
+                f"任务来源是 {source}，本 worker 只启用了 "
+                f"{'、'.join(str(k) for k in content_sources) or '（无）'}："
+                "配置在排队之后被改过，这条任务作废，请按原来源重新触发"
             ),
         )
         return EvaluationStatus.ERROR
@@ -399,7 +409,7 @@ def _requeue(session, task: EvaluationTask, settings: Settings, error: str) -> N
 def run_once(
     *,
     settings: Settings,
-    content_source: SkillContentSource,
+    content_sources: dict[ContentSource, SkillContentSource],
     storage: ReportStorage,
     evaluator_version: str | None = None,
     queue: str = "fast",
@@ -416,7 +426,7 @@ def run_once(
                 session,
                 task,
                 settings=settings,
-                content_source=content_source,
+                content_sources=content_sources,
                 storage=storage,
                 evaluator_version=evaluator_version,
             )
@@ -466,15 +476,18 @@ def main() -> int:
         logger.error(SCHEMA_NOT_READY_HINT)
         return 1
 
-    content_source = build_content_source(settings)
+    content_sources = build_content_sources(settings)
     storage = LocalReportStorage(settings.report_root)
 
-    logger.info("worker 已启动，轮询队列 fast")
+    logger.info(
+        "worker 已启动，轮询队列 fast，启用的内容来源：%s",
+        "、".join(str(kind) for kind in content_sources),
+    )
     while True:
         try:
             worked = run_once(
                 settings=settings,
-                content_source=content_source,
+                content_sources=content_sources,
                 storage=storage,
                 evaluator_version=report.version,
             )

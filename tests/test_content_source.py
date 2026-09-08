@@ -14,8 +14,9 @@ from skillprism.content import (
     LocalDirectorySource,
     SkillNotFoundError,
     ZipArchiveSource,
-    build_content_source,
-    resolve_source_kind,
+    build_content_sources,
+    enabled_sources,
+    join_skill_id,
     split_skill_id,
     validate_ref,
 )
@@ -126,12 +127,14 @@ def test_template_must_have_placeholder():
 
 def test_factory_picks_zip_source_when_configured():
     settings = Settings(content_url_template=TEMPLATE, content_token="x")
-    assert isinstance(build_content_source(settings), ZipArchiveSource)
+    sources = build_content_sources(settings)
+    assert isinstance(sources[ContentSource.ZIP], ZipArchiveSource)
 
 
 def test_factory_falls_back_to_local_directory():
     settings = Settings(content_url_template="")
-    assert isinstance(build_content_source(settings), LocalDirectorySource)
+    sources = build_content_sources(settings)
+    assert isinstance(sources[ContentSource.LOCAL], LocalDirectorySource)
 
 
 # ---- GitLab 归档接口 ----
@@ -268,29 +271,73 @@ def test_validate_ref_accepts_normal_refs():
 
 def test_factory_picks_gitlab_source_when_configured():
     settings = Settings(gitlab_base_url=GITLAB, gitlab_token="x")
-    assert isinstance(build_content_source(settings), GitLabArchiveSource)
+    sources = build_content_sources(settings)
+    assert isinstance(sources[ContentSource.GITLAB], GitLabArchiveSource)
 
 
-def test_factory_rejects_both_sources_configured():
-    """两种接入对 skill_id/skill_version 的解释不同，挑一个会默默评错东西。"""
+def test_both_sources_can_be_enabled_at_once():
+    """两种接入不再互斥。
+
+    曾经互斥是因为一次触发说不清自己是哪种：两边对 skill_id 的解释不同，
+    服务端只能按配置猜。现在来源由入口声明、随任务落库，理由就没有了。
+    """
     settings = Settings(gitlab_base_url=GITLAB, content_url_template=TEMPLATE)
-    with pytest.raises(ValueError, match="只能配一个"):
-        build_content_source(settings)
+    sources = build_content_sources(settings)
+
+    assert isinstance(sources[ContentSource.ZIP], ZipArchiveSource)
+    assert isinstance(sources[ContentSource.GITLAB], GitLabArchiveSource)
+    assert ContentSource.LOCAL not in sources, "配了真来源就不该再挂着开发用的本地目录"
 
 
 @pytest.mark.parametrize(
     ("settings", "expected"),
     [
-        (Settings(gitlab_base_url=GITLAB), ContentSource.GITLAB),
-        (Settings(content_url_template=TEMPLATE), ContentSource.ZIP),
-        (Settings(), ContentSource.LOCAL),
+        (Settings(gitlab_base_url=GITLAB), (ContentSource.GITLAB,)),
+        (Settings(content_url_template=TEMPLATE), (ContentSource.ZIP,)),
+        (
+            Settings(gitlab_base_url=GITLAB, content_url_template=TEMPLATE),
+            (ContentSource.ZIP, ContentSource.GITLAB),
+        ),
+        (Settings(), (ContentSource.LOCAL,)),
     ],
 )
-def test_resolve_source_kind_maps_config_to_the_enum(settings, expected):
-    """判定只有这一处。提交路径（写进任务）、worker（选实现）、查询路径
-    （定位结论）都问它——各判各的早晚会分叉，那种分叉的表现是"结论存在
-    A 名下、查询去 B 名下找"。"""
-    assert resolve_source_kind(settings) is expected
+def test_enabled_sources_maps_config_to_the_enum(settings, expected):
+    """判定只有这一处：API 用它决定入口开不开、缺省取哪个，worker 用它造
+    客户端表。各判各的早晚会分叉，那种分叉的表现是"结论存在 A 名下、
+    查询去 B 名下找"。"""
+    assert enabled_sources(settings) == expected
+
+
+@pytest.mark.parametrize(
+    ("project", "subdir", "expected"),
+    [
+        ("group/repo", None, "group/repo"),
+        ("group/repo", "skills/foo", "group/repo:skills/foo"),
+        ("group/repo/", "/skills/foo/", "group/repo:skills/foo"),
+        ("42", "skills", "42:skills"),
+        ("group/repo", "", "group/repo"),
+    ],
+)
+def test_join_skill_id_encodes_the_internal_identity(project, subdir, expected):
+    """对外是两个字段，对内仍是那一列 skill_id。落库形态不变是有意的：
+    已有的结论、查询与报告地址都按它寻址。"""
+    assert join_skill_id(project, subdir) == expected
+
+
+@pytest.mark.parametrize(
+    ("project", "subdir"),
+    [
+        ("group/repo", "../etc"),
+        ("group/repo", "a:b"),
+        ("../repo", None),
+        ("", None),
+    ],
+)
+def test_join_skill_id_rejects_what_split_would_reject(project, subdir):
+    """拼完立刻按 split_skill_id 校验一遍：写错的位置当场报错，
+    不用等 worker 去取内容才暴露。"""
+    with pytest.raises(SkillNotFoundError):
+        join_skill_id(project, subdir)
 
 
 def test_version_selects_content_is_a_property_of_the_source():

@@ -98,7 +98,13 @@ class EvaluationDTO(BaseModel):
 
 
 class SubmitRequest(BaseModel):
-    """管理系统触发评测。
+    """按 zip 下载接口触发评测（``POST /api/evaluations/zip``）。
+
+    也是保留通道 ``POST /api/evaluations`` 的请求体：那个接口在只启用了一种
+    接入时按那一种解释这些字段。GitLab 接入用 :class:`GitLabSubmitRequest`，
+    它的字段是 ``project`` / ``subdir`` / ``ref``——两种接入对"哪个 skill"和
+    "哪个版本"的解释不同，塞进同一组字段的话，服务端就只能靠配置猜是哪种，
+    猜错不会报错、只会默默评错东西。
 
     只声明"评哪个 skill"，内容由 worker 按 skill_id 去管理系统下载。
     提交时不下载：这个调用挂在用户上传流程后面，不能被我们的网络耗时
@@ -118,11 +124,43 @@ class SubmitRequest(BaseModel):
     tier: Tier = Tier.TIER1
     #: 内容未变时默认复用已有结果；置 true 强制重跑。
     force: bool = False
-    #: 这次评的是一组耦合 skill：``skill_id`` 指向装着多个 skill 的父目录
-    #: （GitLab 接入下形如 ``group/repo:skills``），一次提交产出多条结果。
+    #: 这次评的是一组耦合 skill：``skill_id`` 指向装着多个 skill 的父目录，
+    #: 一次提交产出多条结果。
     #:
     #: 必须由触发方声明，我们不看内容形态推断——``skill_id`` 少写一层子目录
     #: 就会静默变成评另一批东西。声明与内容不符时任务直接失败并说明原因。
+    bundle: bool = False
+
+
+class GitLabSubmitRequest(BaseModel):
+    """按 GitLab 仓库触发评测（``POST /api/evaluations/gitlab``）。
+
+    位置与版本各占自己的字段，不复用 zip 那套 ``skill_id`` / ``skill_version``：
+    这边的"哪个 skill"是 (项目, 仓库内子目录)，"哪个版本"是 git ref。内部仍
+    编码成 ``项目[:子目录]`` 存进 ``skill_id``（见 ``content.join_skill_id``），
+    但那是内部约定，不该要求调用方懂。
+
+    好处不只是字段名好看：项目路径、子目录、ref 的合法性在**提交时**就校验，
+    写错当场 422；塞在一个字符串里的时候，这些错要等 worker 去取内容才暴露，
+    表现成一条十秒后失败的任务。
+    """
+
+    #: GitLab 项目路径 ``group/repo``，也接受数字项目 ID。
+    project: str = Field(min_length=1, max_length=255)
+    #: 仓库内子目录，例 ``skills/log-triage``。留空表示 SKILL.md 在仓库根。
+    #: 带子目录时只取那一个子树——整仓取档容易撞上条目/体积上限，还会把同仓
+    #: 其他 skill 的内容算进 content_hash。
+    subdir: str | None = Field(default=None, max_length=255)
+    #: git ref：分支、tag 或 commit sha。留空用 ``SKILLPRISM_GITLAB_DEFAULT_REF``。
+    #: 它**决定取到哪份内容**，这一点和 zip 接入的自由文本版本号不同，
+    #: 所以它进排队去重的键（见 ContentSource.version_selects_content）。
+    ref: str | None = Field(default=None, max_length=128)
+    #: 同 SubmitRequest.skill_name：物化目录用它命名，会和 frontmatter 比对。
+    skill_name: str = Field(min_length=1, max_length=255)
+    tier: Tier = Tier.TIER1
+    force: bool = False
+    #: ``project`` + ``subdir`` 指向装着多个 skill 的父目录，例 ``skills``。
+    #: Claude plugin 形态的仓库要指到 ``skills`` 那一层，不是仓库根。
     bundle: bool = False
 
 

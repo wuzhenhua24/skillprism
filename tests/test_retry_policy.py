@@ -80,7 +80,9 @@ def env(tmp_path, monkeypatch, db_url):
 
 def _run(env, source) -> None:
     run_once(
-        settings=env, content_source=source, storage=LocalReportStorage(env.report_root)
+        settings=env,
+        content_sources={ContentSource.LOCAL: source},
+        storage=LocalReportStorage(env.report_root),
     )
 
 
