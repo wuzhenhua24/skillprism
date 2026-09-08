@@ -211,16 +211,35 @@ def test_subdir_does_not_bypass_manifest_check():
         read_skill_zip(data, subdir="skills/foo")
 
 
-def test_subdir_does_not_swallow_files_outside_it():
-    """子目录之外还有文件时必须报错，不能悄悄丢掉——残缺的 skill 比失败更有害。"""
+def test_subdir_takes_only_declared_subtree_from_whole_repo_archive():
+    """老版 GitLab 忽略取档 URL 上的 path、返回整仓，这时要自己筛出子树。
+
+    ``path`` 是较新版本才加进 archive.zip 的；老实例上它不报错，只是当没看见。
+    要求整包都落在子目录下的话，这类实例上每次带子目录的取档都必然失败。
+    """
     data = build_zip(
         [
             ("repo-main-abc123/skills/foo/SKILL.md", MANIFEST),
+            ("repo-main-abc123/skills/foo/ref/a.md", b"a"),
             ("repo-main-abc123/README.md", b"x"),
+            ("repo-main-abc123/agents/other.md", b"y"),
         ]
     )
-    with pytest.raises(ArchiveError, match="没有声明的子目录"):
-        read_skill_zip(data, subdir="skills/foo")
+    files = read_skill_zip(data, subdir="skills/foo")
+    assert {f.path for f in files} == {"SKILL.md", "ref/a.md"}
+
+
+def test_subdir_result_is_same_whether_server_filtered_or_not():
+    """服务端过没过滤，解出来的文件集必须一样——否则 content_hash 会随 GitLab 版本变。"""
+    entries = [
+        ("repo-main-abc123/skills/foo/SKILL.md", MANIFEST),
+        ("repo-main-abc123/skills/foo/ref/a.md", b"a"),
+    ]
+    filtered = read_skill_zip(build_zip(entries), subdir="skills/foo")
+    whole_repo = read_skill_zip(
+        build_zip([*entries, ("repo-main-abc123/README.md", b"x")]), subdir="skills/foo"
+    )
+    assert [(f.path, f.data) for f in filtered] == [(f.path, f.data) for f in whole_repo]
 
 
 def test_subdir_still_rejects_symlinks():
@@ -234,6 +253,52 @@ def test_subdir_still_rejects_symlinks():
     )
     with pytest.raises(ArchiveError, match="符号链接"):
         read_skill_zip(data, subdir="skills/foo")
+
+
+def test_subdir_tolerates_symlink_outside_declared_subtree():
+    """整仓归档里别处的符号链接不该牵连本子树：它不会被读、也不会落盘。"""
+    data = build_zip(
+        [
+            ("repo-main-abc123/skills/foo/SKILL.md", MANIFEST),
+            ("repo-main-abc123/vendor/link", b"/etc/passwd"),
+        ],
+        symlinks=("repo-main-abc123/vendor/link",),
+    )
+    files = read_skill_zip(data, subdir="skills/foo")
+    assert {f.path for f in files} == {"SKILL.md"}
+
+
+def test_subdir_tolerates_unsafe_path_outside_declared_subtree():
+    """同理：别处一个落不了盘的文件名（这里是 Windows 保留名）不该让 skill 评不了。"""
+    data = build_zip(
+        [
+            ("repo-main-abc123/skills/foo/SKILL.md", MANIFEST),
+            ("repo-main-abc123/src/aux.c", b"int main(){}"),
+        ]
+    )
+    files = read_skill_zip(data, subdir="skills/foo")
+    assert {f.path for f in files} == {"SKILL.md"}
+
+
+def test_subdir_still_rejects_unsafe_path_inside_declared_subtree():
+    data = build_zip(
+        [
+            ("repo-main-abc123/skills/foo/SKILL.md", MANIFEST),
+            ("repo-main-abc123/skills/foo/sub\\file.md", b"x"),
+        ]
+    )
+    with pytest.raises(ArchiveError, match="不安全路径"):
+        read_skill_zip(data, subdir="skills/foo")
+
+
+def test_subdir_counts_limits_against_kept_entries_only():
+    """条目数上限说的是"这个 skill 有多少文件"，不是"这个仓库有多少文件"。"""
+    data = build_zip(
+        [("repo-main-abc123/skills/foo/SKILL.md", MANIFEST)]
+        + [(f"repo-main-abc123/big/f{i}.txt", b"x") for i in range(MAX_FILES + 10)]
+    )
+    files = read_skill_zip(data, subdir="skills/foo")
+    assert {f.path for f in files} == {"SKILL.md"}
 
 
 # ---- 一组耦合 skill（bundle）----
@@ -269,6 +334,31 @@ def test_bundle_strips_git_archive_prefix():
     bundle = read_skill_bundle(data, subdir="skills")
     assert bundle.members == ["a", "b"]
     assert {f.path for f in bundle.files} == {"a/SKILL.md", "b/SKILL.md"}
+
+
+def test_bundle_subdir_from_whole_repo_archive():
+    """老实例忽略 path 时，plugin 仓的整仓归档也要能按声明的 skills/ 取出一组。
+
+    这正是线上撞到的形态：仓里还有 .claude-plugin/、agents/、commands/，
+    它们不属于声明的子树，筛掉即可，不该让整次评测失败。
+    """
+    data = build_zip(
+        [
+            ("repo-master-abc123/.claude-plugin/plugin.json", b"{}"),
+            ("repo-master-abc123/agents/reviewer.md", b"# reviewer"),
+            ("repo-master-abc123/commands/deploy.md", b"# deploy"),
+            ("repo-master-abc123/skills/code-review/SKILL.md", MANIFEST),
+            ("repo-master-abc123/skills/dev-db-spec/SKILL.md", MANIFEST),
+            ("repo-master-abc123/skills/shared/api.md", b"# api"),
+        ]
+    )
+    bundle = read_skill_bundle(data, subdir="skills")
+    assert bundle.members == ["code-review", "dev-db-spec"]
+    assert {f.path for f in bundle.files} == {
+        "code-review/SKILL.md",
+        "dev-db-spec/SKILL.md",
+        "shared/api.md",
+    }
 
 
 def test_single_member_bundle_is_not_flattened():

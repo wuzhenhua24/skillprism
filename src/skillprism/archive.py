@@ -112,13 +112,24 @@ def _strip_common_root(paths: list[str]) -> str | None:
 def _prefix_for_subdir(paths: list[str], subdir: str) -> str:
     """调用方声明了 skill 在归档里的子目录时，算出要剥掉的前缀。
 
-    与 :func:`_strip_common_root` 的区别在于这里**不推断**：布局是调用方
-    给出的（GitLab 源知道自己按哪个 path 取的归档），对不上就报错，不去
-    试第二种解读。
+    与 :func:`_strip_common_root` 的区别在于这里**不推断**：前缀里的子目录
+    是调用方给出的（GitLab 源知道自己按哪个 path 取的归档），归档里没有这个
+    子目录就报错，不去试第二种解读。
 
     只接受两种前缀：``<subdir>/``，以及带一层归档顶层目录的
     ``<root>/<subdir>/``——后者是 Git 服务端打包的固定形态，顶层目录名
-    形如 ``<repo>-<ref>-<sha>``，含 sha，事先猜不出来。
+    形如 ``<repo>-<ref>-<sha>``，含 sha，事先猜不出来。有顶层目录时两个候选
+    互斥（``_single_top_level`` 要求**所有**条目都在该目录下），不存在选错的
+    情况。
+
+    判据是"**有**条目落在前缀下"，不是"**所有**条目都落在前缀下"：取档 URL
+    上的 ``path`` 只是一个优化，不是保证——老版 GitLab（早于 archive.zip
+    支持 ``path`` 的版本）会忽略它、返回整仓归档。要求整包都在子目录下的话，
+    这类实例上每一次带子目录的取档都必然失败。改成筛选之后，服务端过没过滤
+    得到的文件集完全一样，``content_hash`` 也就不会因为 GitLab 版本而变。
+
+    子目录之外的条目一律丢弃，这不会让 skill 残缺：按定义它们不属于
+    ``<subdir>/`` 这棵子树。
     """
     candidates = []
     root = _single_top_level(paths)
@@ -127,7 +138,7 @@ def _prefix_for_subdir(paths: list[str], subdir: str) -> str:
     candidates.append(f"{subdir}/")
 
     for prefix in candidates:
-        if all(p.startswith(prefix) for p in paths):
+        if any(p.startswith(prefix) for p in paths):
             return prefix
 
     raise ArchiveError(
@@ -138,10 +149,10 @@ def _prefix_for_subdir(paths: list[str], subdir: str) -> str:
 def read_skill_zip(data: bytes, *, subdir: str | None = None) -> list[SkillFile]:
     """把一个 skill 的 zip 解成文件列表。
 
-    ``subdir`` 声明 skill 在归档里的子目录。给了就按它剥前缀、对不上就报错；
-    不给则沿用"根上或单层顶层目录"的推断。这个口子是给 Git 归档用的：
-    那边的条目形如 ``<repo>-<ref>-<sha>/skills/foo/SKILL.md``，层级由调用方
-    的取档参数决定，不该由这里去猜。
+    ``subdir`` 声明 skill 在归档里的子目录。给了就只取这棵子树、归档里没有
+    这个子目录才报错；不给则沿用"根上或单层顶层目录"的推断。这个口子是给
+    Git 归档用的：那边的条目形如 ``<repo>-<ref>-<sha>/skills/foo/SKILL.md``，
+    层级由调用方的取档参数决定，不该由这里去猜。
 
     任何一条防线被触发就整体拒绝，不做部分解出——一个残缺的 skill 评出来
     的结果比评测失败更有害，因为它看起来是有效的。
@@ -320,6 +331,14 @@ def _extract(
 
     单 skill 与 bundle 只在"什么样的布局算合法"上不同，安全部分必须共用
     一份实现——各写一遍的话，将来加一道防线只会加到其中一边。
+
+    顺序是**先定前缀、筛掉子目录之外的条目，再上防线**。因为归档不一定只装
+    着我们要的那棵子树：老版 GitLab 会忽略取档 URL 上的 ``path``、返回整仓
+    （见 :func:`_prefix_for_subdir`）。防线跟着"会被物化的条目"走，而不是跟着
+    "归档里恰好有什么"走——否则同仓另一个目录里的一个符号链接、一个
+    ``aux.c``（Windows 保留名）、或者仅仅是仓库文件多，就能让一个本身干净的
+    skill 评不了。被丢弃的条目一个字节都不会读，也不会落盘，对它们设防没有
+    意义；反过来，落在前缀内的条目一道防线都不少。
     """
     try:
         archive = zipfile.ZipFile(io.BytesIO(data))
@@ -327,42 +346,53 @@ def _extract(
         raise ArchiveError(f"不是合法的 zip 归档：{exc}") from exc
 
     with archive:
-        infos = archive.infolist()
-
-        entries: list[zipfile.ZipInfo] = []
-        for info in infos:
-            if _is_symlink(info):
-                raise ArchiveError(f"归档含符号链接条目：{info.filename!r}")
+        # 条目名先规范化，但校验不过的**先记下来不报错**：前缀是按规范化后的
+        # 名字比的（NFC、``./`` 这类差异必须在比较前抹平），而子目录之外的一个
+        # 坏名字不该牵连另一棵子树里的 skill。落在前缀内的下面立刻报。
+        ok: list[tuple[zipfile.ZipInfo, str]] = []
+        unsafe: list[tuple[str, UnsafePathError]] = []
+        for info in archive.infolist():
             if info.is_dir():
                 continue
+            try:
+                ok.append((info, safe_relative_path(info.filename).as_posix()))
+            except UnsafePathError as exc:
+                unsafe.append((info.filename, exc))
+
+        if not ok:
+            if unsafe:
+                raise ArchiveError(f"归档含不安全路径：{unsafe[0][1]}")
+            raise ArchiveError("归档为空")
+
+        prefix = resolve_prefix([path for _, path in ok])
+
+        # 不安全条目按原始名比前缀：规范化失败就没有规范化后的名字可比，宁可
+        # 用原始名多报一个，也不放过一个真的落在子树里的。
+        for name, exc in unsafe:
+            if name.startswith(prefix):
+                raise ArchiveError(f"归档含不安全路径：{exc}") from exc
+
+        entries = [(info, path) for info, path in ok if path.startswith(prefix)]
+
+        for info, _ in entries:
+            if _is_symlink(info):
+                raise ArchiveError(f"归档含符号链接条目：{info.filename!r}")
             if not _is_regular_file(info):
                 raise ArchiveError(f"归档含非普通文件条目：{info.filename!r}")
-            entries.append(info)
 
-        if not entries:
-            raise ArchiveError("归档为空")
         if len(entries) > max_files:
             raise ArchiveError(f"归档条目数超限：{len(entries)} > {max_files}")
 
         # 先按声明值快速预筛。声明值不可信，但用来挡住明显过大的归档很便宜。
         declared_total = 0
-        for info in entries:
+        for info, _ in entries:
             if info.file_size > MAX_FILE_BYTES:
                 raise ArchiveError(f"条目声明大小超限：{info.filename!r} 为 {info.file_size} 字节")
             declared_total += info.file_size
         if declared_total > max_total_bytes:
             raise ArchiveError(f"归档声明总大小超限：{declared_total} > {max_total_bytes}")
 
-        # 路径校验放在读取内容之前——不安全的归档不该被读一个字节。
-        raw_paths: list[str] = []
-        for info in entries:
-            try:
-                raw_paths.append(safe_relative_path(info.filename).as_posix())
-            except UnsafePathError as exc:
-                raise ArchiveError(f"归档含不安全路径：{exc}") from exc
-
-        prefix = resolve_prefix(raw_paths)
-        paths = [p[len(prefix) :] for p in raw_paths]
+        paths = [path[len(prefix) :] for _, path in entries]
 
         seen: set[str] = set()
         for path in paths:
@@ -374,7 +404,7 @@ def _extract(
 
         files: list[SkillFile] = []
         actual_total = 0
-        for info, path in zip(entries, paths, strict=True):
+        for (info, _), path in zip(entries, paths, strict=True):
             try:
                 with archive.open(info) as handle:
                     # 多读一个字节：读满上限说明声明值撒了谎。

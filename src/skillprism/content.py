@@ -340,8 +340,13 @@ class GitLabArchiveSource:
     def _url(self, project: str, ref: str, subdir: str | None) -> str:
         params = {"sha": ref}
         if subdir:
-            # 只取这一个子树。整仓取档很容易撞上 MAX_FILES / 体积上限，
-            # 而且会把同仓其他 skill 的内容算进 content_hash。
+            # 让服务端只打这一棵子树：整仓归档很容易撞上 max_bytes 下载上限，
+            # 白下几十 MB 也是浪费。
+            #
+            # 但这是**优化，不是保证**：archive.zip 的 path 是较新版本才加的，
+            # 老实例不报错、只是当没看见，照样返回整仓。真正保证"只取这棵子树"
+            # 的是解归档那边按 subdir 的筛选（见 archive._prefix_for_subdir），
+            # 那里两种服务端得到的文件集一样，content_hash 也就不随版本变。
             params["path"] = subdir
         # quote_via=quote 让空格编成 %20 而不是 +。目录名带空格很少见，但
         # `+` 只在 form-urlencoded 的解读下才是空格，换个服务端就变成字面加号。
