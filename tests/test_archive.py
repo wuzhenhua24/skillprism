@@ -447,3 +447,16 @@ def test_bundle_rejects_too_many_members():
     )
     with pytest.raises(ArchiveError, match="成员数超限"):
         read_skill_bundle(data)
+
+
+def test_bundle_member_cap_is_a_parameter():
+    """上限由调用方给（部署可调），默认才取模块常量。
+
+    读配置的事不进 archive：这个函数要保持纯函数，测试才能直接拿构造出来的
+    归档跑，不需要环境变量。
+    """
+    data = build_zip([(f"skill-{i}/SKILL.md", MANIFEST) for i in range(3)])
+
+    assert len(read_skill_bundle(data, max_members=3).members) == 3
+    with pytest.raises(ArchiveError, match="成员数超限：3 > 2"):
+        read_skill_bundle(data, max_members=2)

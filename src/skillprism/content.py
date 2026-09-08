@@ -20,6 +20,7 @@ import httpx
 from skillprism.archive import ArchiveError, read_skill_bundle, read_skill_zip
 from skillprism.domain import ContentSource
 from skillprism.materialize import (
+    MAX_BUNDLE_MEMBERS,
     MAX_FILE_BYTES,
     SKILL_MANIFEST,
     SkillBundle,
@@ -174,6 +175,7 @@ class ZipArchiveSource:
         token: str = "",
         timeout: float = 60.0,
         max_bytes: int = 64 * 1024 * 1024,
+        max_bundle_members: int = MAX_BUNDLE_MEMBERS,
     ) -> None:
         if "{skill_id}" not in url_template:
             raise ValueError("url_template 必须包含 {skill_id} 占位符")
@@ -181,6 +183,7 @@ class ZipArchiveSource:
         self.token = token
         self.timeout = timeout
         self.max_bytes = max_bytes
+        self.max_bundle_members = max_bundle_members
 
     def _url(self, skill_id: str) -> str:
         # skill_id 可能含 /（如 team/name），整体编码避免它改变路径结构。
@@ -207,7 +210,7 @@ class ZipArchiveSource:
     def fetch_bundle(self, skill_id: str, version: str | None = None) -> SkillBundle:
         data = self._download(self._url(skill_id))
         try:
-            return read_skill_bundle(data)
+            return read_skill_bundle(data, max_members=self.max_bundle_members)
         except ArchiveError as exc:
             raise SkillNotFoundError(f"归档无法解出（{skill_id}）：{exc}") from exc
 
@@ -318,6 +321,7 @@ class GitLabArchiveSource:
         default_ref: str = "main",
         timeout: float = 60.0,
         max_bytes: int = 64 * 1024 * 1024,
+        max_bundle_members: int = MAX_BUNDLE_MEMBERS,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         if not self.base_url:
@@ -327,6 +331,7 @@ class GitLabArchiveSource:
         self.default_ref = default_ref
         self.timeout = timeout
         self.max_bytes = max_bytes
+        self.max_bundle_members = max_bundle_members
 
     def _headers(self) -> dict[str, str]:
         """按配置的头名发令牌。
@@ -372,7 +377,7 @@ class GitLabArchiveSource:
         """
         project, ref, subdir, data = self._download_archive(skill_id, version)
         try:
-            return read_skill_bundle(data, subdir=subdir)
+            return read_skill_bundle(data, subdir=subdir, max_members=self.max_bundle_members)
         except ArchiveError as exc:
             raise SkillNotFoundError(f"归档无法解出（{project}@{ref}）：{exc}") from exc
 
@@ -436,6 +441,7 @@ def _build_one(settings, kind: ContentSource) -> SkillContentSource:
             default_ref=settings.gitlab_default_ref,
             timeout=settings.content_timeout_seconds,
             max_bytes=settings.max_download_bytes,
+            max_bundle_members=settings.max_bundle_members,
         )
     if kind is ContentSource.ZIP:
         return ZipArchiveSource(
@@ -443,5 +449,6 @@ def _build_one(settings, kind: ContentSource) -> SkillContentSource:
             token=settings.content_token,
             timeout=settings.content_timeout_seconds,
             max_bytes=settings.max_download_bytes,
+            max_bundle_members=settings.max_bundle_members,
         )
     return LocalDirectorySource(settings.local_skills_root)

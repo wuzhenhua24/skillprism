@@ -160,6 +160,8 @@ SKILLPRISM_LOCAL_SKILLS_ROOT=/var/lib/skillprism/skills
 SKILLPRISM_POLICY_FILE=/opt/skillprism/profiles/internal.yaml
 SKILLPRISM_SKILLEVALUATOR_BIN=/var/lib/skillprism/.local/bin/skillevaluator
 SKILLPRISM_EVAL_TIMEOUT_SECONDS=600
+# 一个 bundle 最多几个成员。成员越多越贴近上面那个超时，两者要一起看
+SKILLPRISM_MAX_BUNDLE_MEMBERS=64
 SKILLPRISM_REQUIRE_SCANNERS=true
 # 额外传给评测子进程的环境变量，K=V 逗号分隔。留空即可，见下文说明
 SKILLPRISM_SCANNER_ENV=
@@ -572,6 +574,7 @@ worker 写的报告，所以两者必须同机。要真正横向扩展需要先�
 | 走 GitLab 源，**所有** skill 都报"取不到内容" | 令牌头名或权限不对。GitLab 对无权限的项目也返回 404（防枚举），而 404 在我们这里是不重试的终结态 | 先验令牌：`curl -H "PRIVATE-TOKEN: $TOKEN" "$BASE/api/v4/projects/<group%2Frepo>"`。PAT / group / project token 用 `PRIVATE-TOKEN`，CI 的 `CI_JOB_TOKEN` 只认 `JOB-TOKEN`，改 `SKILLPRISM_GITLAB_TOKEN_HEADER` |
 | 走 GitLab 源，报"归档里没有声明的子目录" | 归档里确实没有这个子目录：`skill_id` 里的子目录与仓库实际布局对不上 | `skill_id` 形如 `group/repo:skills/foo`，子目录是相对仓库根的路径且必须直接含 `SKILL.md`。子目录**之外**的文件不会导致这条报错——服务端没按 `path` 过滤时（老版 GitLab）我们自己筛 |
 | 走 GitLab 源，报"归档条目数超限"或"总大小超限" | `skill_id` 没带子目录，整个仓库被当成一个 skill | 带上子目录。上限只算落在声明子目录下的条目，同仓其他目录多大都不影响 |
+| 提交一组 skill，报"成员数超限" | 仓库里的 skill 数超过 `SKILLPRISM_MAX_BUNDLE_MEMBERS`（默认 64） | 调大该项并重启 worker。同时看 `SKILLPRISM_EVAL_TIMEOUT_SECONDS`：catalog 是一个子进程跑完全部成员，超时一到是**整组**没有报告，不是慢一点。条目数（2048）与总量（128 MB）上限不随它变，成员太多摊不开会先撞那两条 |
 | 走 GitLab 源，报"下载体积超限" | 老版 GitLab 的 `archive.zip` 不认 `path`，即使声明了子目录也会返回整仓归档，整仓超过 `SKILLPRISM_MAX_DOWNLOAD_BYTES` | 这一条只能在下载侧解决：调大该上限，或把 skill 迁到小一些的仓库。解归档不受影响，子目录照样能筛出来 |
 | 任务在 `queued` 与失败之间来回，`attempts` 在涨 | 正在退避重试 | `GET /api/tasks/{task_id}` 看 `error` 和 `next_attempt_at`——前者是上次失败的原因，后者是下次重试时间 |
 

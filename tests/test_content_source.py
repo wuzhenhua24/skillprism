@@ -7,6 +7,7 @@ import zipfile
 
 import httpx
 import pytest
+from pydantic import ValidationError
 
 from skillprism.content import (
     ContentFetchError,
@@ -22,6 +23,7 @@ from skillprism.content import (
 )
 from skillprism.config import Settings
 from skillprism.domain import ContentSource
+from skillprism.materialize import MAX_BUNDLE_FILES
 
 TEMPLATE = "https://mgmt.example/api/skills/{skill_id}/download"
 GITLAB = "https://gitlab.internal"
@@ -273,6 +275,25 @@ def test_factory_picks_gitlab_source_when_configured():
     settings = Settings(gitlab_base_url=GITLAB, gitlab_token="x")
     sources = build_content_sources(settings)
     assert isinstance(sources[ContentSource.GITLAB], GitLabArchiveSource)
+
+
+def test_factory_passes_bundle_member_cap_to_both_archive_sources():
+    """成员数上限是部署可调项，两条归档路径都要接上，不能只接 GitLab 那条。"""
+    settings = Settings(
+        gitlab_base_url=GITLAB, content_url_template=TEMPLATE, max_bundle_members=7
+    )
+    sources = build_content_sources(settings)
+
+    assert sources[ContentSource.GITLAB].max_bundle_members == 7
+    assert sources[ContentSource.ZIP].max_bundle_members == 7
+
+
+def test_bundle_member_cap_must_be_sane():
+    """0 会让所有 bundle 都提交不了，比条目数上限还大则是个填错的数。"""
+    with pytest.raises(ValidationError):
+        Settings(max_bundle_members=0)
+    with pytest.raises(ValidationError):
+        Settings(max_bundle_members=MAX_BUNDLE_FILES + 1)
 
 
 def test_both_sources_can_be_enabled_at_once():

@@ -7,6 +7,8 @@ from pathlib import Path
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from skillprism.materialize import MAX_BUNDLE_FILES, MAX_BUNDLE_MEMBERS
+
 
 def parse_scanner_env(value: str) -> dict[str, str]:
     """把 ``K=V,K=V`` 解析成字典。格式不对就抛，不做静默忽略。"""
@@ -80,6 +82,19 @@ class Settings(BaseSettings):
 
     eval_timeout_seconds: int = 600
 
+    #: 一个 bundle 最多几个成员。默认见 materialize.MAX_BUNDLE_MEMBERS；这里
+    #: 开成可调是因为它挡住的是**真实内容的规模**（一个 plugin 仓里有多少
+    #: skill），而那取决于对接哪个仓库，不是本服务能定死的数。
+    #:
+    #: 调大之前先想清楚两件事：
+    #:
+    #: * 条目数与总量上限**不跟着涨**（MAX_BUNDLE_FILES / MAX_BUNDLE_TOTAL_BYTES
+    #:   仍是常量）。成员多到摊不开时会先撞那两条，报错会直接说是哪条。
+    #: * catalog 是一个子进程跑完全部成员（runner.run_catalog），成员越多越贴近
+    #:   EVAL_TIMEOUT_SECONDS，而那个超时一到是**整组没有报告**，不是慢一点。
+    #:   真正的天花板在那儿，调这个数时要同步看那个。
+    max_bundle_members: int = MAX_BUNDLE_MEMBERS
+
     #: 额外传给评测子进程的环境变量，格式 ``K=V``，逗号分隔。
     #:
     #: 子进程默认只拿到 PATH/HOME（见 runner._subprocess_env），systemd 的
@@ -146,6 +161,23 @@ class Settings(BaseSettings):
         value = value.strip()
         if not value or any(ord(ch) < 0x21 or ord(ch) > 0x7E or ch == ":" for ch in value):
             raise ValueError(f"SKILLPRISM_GITLAB_TOKEN_HEADER 不是合法的请求头名：{value!r}")
+        return value
+
+    @field_validator("max_bundle_members")
+    @classmethod
+    def _max_bundle_members_is_sane(cls, value: int) -> int:
+        """挡住两头：0 让所有 bundle 都提交不了，比上限还大则是个填错的数。
+
+        上界取 ``MAX_BUNDLE_FILES``——一个成员至少占一个 ``SKILL.md``，成员数
+        超过条目数上限时那个上限会先拦下来，这里配的数根本到不了。
+        """
+        if value < 1:
+            raise ValueError(f"SKILLPRISM_MAX_BUNDLE_MEMBERS 至少为 1：{value!r}")
+        if value > MAX_BUNDLE_FILES:
+            raise ValueError(
+                f"SKILLPRISM_MAX_BUNDLE_MEMBERS 不能超过归档条目数上限 "
+                f"{MAX_BUNDLE_FILES}（一个成员至少占一个 SKILL.md）：{value!r}"
+            )
         return value
 
     @field_validator("scanner_env")

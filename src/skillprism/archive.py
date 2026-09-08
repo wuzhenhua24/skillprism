@@ -182,7 +182,9 @@ def read_skill_zip(data: bytes, *, subdir: str | None = None) -> list[SkillFile]
     )
 
 
-def read_skill_bundle(data: bytes, *, subdir: str | None = None) -> SkillBundle:
+def read_skill_bundle(
+    data: bytes, *, subdir: str | None = None, max_members: int = MAX_BUNDLE_MEMBERS
+) -> SkillBundle:
     """把一组耦合 skill 的 zip 解成一个 :class:`SkillBundle`。
 
     与 :func:`read_skill_zip` 走同一条安全流水线（符号链接、解压炸弹、
@@ -192,6 +194,12 @@ def read_skill_bundle(data: bytes, *, subdir: str | None = None) -> SkillBundle:
 
     根上有 ``SKILL.md`` 就明确报错而不是降级成单 skill：调用方声明了这是
     一组，内容却是一个，这种不一致要当场说出来，不能替它改判。
+
+    ``max_members`` 由调用方给（部署可调，见 ``Settings.max_bundle_members``），
+    默认取模块常量。上限本身来自配置，但读配置的事不进这里——这个函数保持
+    纯函数，才能直接拿构造出来的恶意归档做测试，不需要起服务、也不需要环境
+    变量。其余几条上限（条目数、总量、单文件）仍是常量：它们防的是归档本身的
+    形状，与"这个部署对接的仓库有多大"无关。
     """
     subdir = subdir.strip("/") if subdir else None
 
@@ -220,8 +228,11 @@ def read_skill_bundle(data: bytes, *, subdir: str | None = None) -> SkillBundle:
         members = _bundle_members(paths)
         if not members:
             raise _no_members_error(paths, base=subdir)
-        if len(members) > MAX_BUNDLE_MEMBERS:
-            raise ArchiveError(f"成员数超限：{len(members)} > {MAX_BUNDLE_MEMBERS}")
+        if len(members) > max_members:
+            raise ArchiveError(
+                f"成员数超限：{len(members)} > {max_members}"
+                "（部署可调：SKILLPRISM_MAX_BUNDLE_MEMBERS）"
+            )
 
     files = _extract(
         data,
