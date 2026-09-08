@@ -192,20 +192,23 @@ def read_skill_bundle(data: bytes, *, subdir: str | None = None) -> SkillBundle:
         if _bundle_members(paths):
             return ""
         root = _single_top_level(paths)
+        stripped = paths
         if root is not None:
             stripped = [p[len(root) + 1 :] for p in paths]
             if _bundle_members(stripped):
                 return f"{root}/"
             _reject_if_single_skill(stripped)
         _reject_if_single_skill(paths)
-        raise ArchiveError(_NO_MEMBERS)
+        # 提示按剥掉归档顶层目录后的路径给：调用方声明的子目录是仓库内相对
+        # 路径，带上 <repo>-<ref>-<sha> 那层前缀的建议它根本填不进去。
+        raise _no_members_error(stripped)
 
     def require_members(paths: list[str]) -> None:
         # subdir 路径上前缀是调用方给的，剥完才知道底下是一个还是一组。
         _reject_if_single_skill(paths)
         members = _bundle_members(paths)
         if not members:
-            raise ArchiveError(_NO_MEMBERS)
+            raise _no_members_error(paths, base=subdir)
         if len(members) > MAX_BUNDLE_MEMBERS:
             raise ArchiveError(f"成员数超限：{len(members)} > {MAX_BUNDLE_MEMBERS}")
 
@@ -226,6 +229,62 @@ _IS_SINGLE_SKILL = (
     f"归档根目录就有 {SKILL_MANIFEST}：这是单个 skill，不是一组。"
     "按单 skill 提交，或把 skill_id 指向包含多个 skill 的父目录"
 )
+
+
+#: Claude plugin 仓的标志目录。它自己不含 skill，但它在场足以说明这个仓是
+#: 按 plugin 打包的——那种布局里 skill 固定在 ``skills/`` 下。
+_PLUGIN_MARKER = ".claude-plugin"
+
+#: 提示里最多列几个候选目录。一个 marketplace 仓能装几十个 plugin，
+#: 全列出来的报错没人读。
+_MAX_HINTED_SUBDIRS = 3
+
+
+def _catalog_candidates(paths: list[str]) -> list[str]:
+    """能当 catalog 根的子目录：其下**直接**含 ``<成员>/SKILL.md``。
+
+    根目录本身不算——根下真有成员就走不到这里。
+    """
+    return sorted(
+        {
+            path.rsplit("/", 2)[0]
+            for path in paths
+            if path.endswith(f"/{SKILL_MANIFEST}") and path.count("/") >= 2
+        }
+    )
+
+
+def _no_members_error(paths: list[str], *, base: str | None = None) -> ArchiveError:
+    """"找不到成员"的报错，尽量指出该把 ``skill_id`` 指到哪一层。
+
+    Claude plugin 仓（``.claude-plugin/`` 加 ``skills/<名>/SKILL.md``）会稳定
+    撞上这条：仓库里确实有一堆 skill，只是埋在 ``skills/`` 下，而这里只认
+    一级子目录。笼统地说"没有成员"会把人支去查仓库布局，实际要改的是
+    ``skill_id`` 多带一段子目录。
+
+    **只改文案，不自动认 ``skills/``。** 布局由调用方声明、对不上就报错是这个
+    模块的前提（见 :func:`_prefix_for_subdir`）；自动推断会让"skill_id 少写
+    一层"重新变成静默评错一批东西。
+
+    ``base`` 是调用方已经声明的子目录，候选要接在它后面才是能直接填回
+    ``skill_id`` 的那一段。
+    """
+    candidates = _catalog_candidates(paths)
+    if not candidates:
+        return ArchiveError(_NO_MEMBERS)
+
+    prefix = f"{base.strip('/')}/" if base else ""
+    shown = [f"{prefix}{name}" for name in candidates[:_MAX_HINTED_SUBDIRS]]
+    hint = "、".join(shown)
+    if len(candidates) > len(shown):
+        hint += f"（另有 {len(candidates) - len(shown)} 个）"
+
+    what = (
+        f"这是一个 Claude plugin 仓（含 {_PLUGIN_MARKER}/）"
+        if any(_PLUGIN_MARKER in path.split("/") for path in paths)
+        else "skill 埋在更深的层级"
+    )
+    return ArchiveError(f"{_NO_MEMBERS}：{what}。把 skill_id 的子目录指到 {hint}")
 
 
 def _reject_if_single_skill(paths: list[str]) -> None:

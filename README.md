@@ -356,6 +356,31 @@ Git 服务端打的包形如 `<repo>-<ref>-<sha>/<子目录>/SKILL.md`，前缀�
 对不上就报错，不去猜第二种解读。没有 `subdir` 时仍是原来的推断规则
 （根上，或单层顶层目录），埋两层以上照旧拒收。
 
+**Claude plugin 形态的仓库**（`.claude-plugin/` 加 `skills/`、`commands/`、
+`agents/`、`hooks/`）不需要额外支持，`skills/` 底下正好就是 bundle 认的
+布局。要点是 `skill_id` **指到 `skills` 那一层**，不是仓库根：
+
+| plugin 仓形态 | `skill_id` | `bundle` |
+| --- | --- | --- |
+| 单 plugin 仓（根上 `.claude-plugin/`） | `group/repo:skills` | `true` |
+| marketplace monorepo | `group/repo:plugins/<plugin>/skills` | `true` |
+| 只评其中一个 skill | `group/repo:skills/<name>` | `false` |
+
+指到仓库根会失败，因为 skill 埋在二级。这个错误在 plugin 场景下是必然会
+撞上的，所以 `_no_members_error` 会把归档里能当 catalog 根的子目录列出来
+（识别到 `.claude-plugin/` 时明说这是 plugin 仓）。**只改文案，不自动认
+`skills/`**——布局由调用方声明、对不上就报错是解归档这一层的前提，自动推断
+会让"`skill_id` 少写一层"重新变成静默评错一批东西。
+
+**别把结论说成"这个 plugin 安全"。** 我们只取 `skills` 子树，`hooks/`、
+`commands/`、`agents/` 一个字节都没下载，而 `hooks.json` 恰恰能在工具调用
+前后跑任意命令。这和"只评 Skills 分类"是同一条立场，但 plugin 是整体安装
+的，展示侧要说清楚徽章覆盖的是哪一部分。
+
+另外预期 `reference_unresolved` 会变多：plugin 的 SKILL.md 里
+`${CLAUDE_PLUGIN_ROOT}/scripts/foo.py` 这类写法很常见，它是路径样式文本，
+正好撞上前面记的那类 SkillSpector 噪声。
+
 **`skill_version` 的语义在两种接入下不同**，去重键也因此不同。zip 接入下它
 是用户手填的标签、内容由 `skill_id` 决定，排队中换个版本号会折叠进同一条
 任务并刷新标签；GitLab 接入下它是 ref，两个 ref 是两份内容，折叠等于宣称评

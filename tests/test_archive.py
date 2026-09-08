@@ -292,6 +292,43 @@ def test_bundle_requires_at_least_one_member():
         read_skill_bundle(data)
 
 
+def test_bundle_error_points_at_plugin_skills_dir():
+    """Claude plugin 仓会稳定撞上"没有成员"：skill 都在 skills/ 下。
+
+    仓库里确实有一堆 skill，笼统地报"没有成员"会把人支去查仓库布局，
+    实际要改的是 skill_id 多带一段子目录。提示里不能带归档顶层目录——
+    那层名字含 sha，填回 skill_id 是错的。
+    """
+    data = build_zip(
+        [
+            ("myplugin-main-abc123/.claude-plugin/plugin.json", b"{}"),
+            ("myplugin-main-abc123/skills/code-review/SKILL.md", MANIFEST),
+            ("myplugin-main-abc123/skills/log-triage/SKILL.md", MANIFEST),
+            ("myplugin-main-abc123/commands/deploy.md", b"# deploy"),
+            ("myplugin-main-abc123/hooks/hooks.json", b"{}"),
+        ]
+    )
+    with pytest.raises(ArchiveError) as excinfo:
+        read_skill_bundle(data)
+
+    message = str(excinfo.value)
+    assert "plugin" in message
+    assert "指到 skills" in message
+    assert "myplugin-main-abc123" not in message
+
+
+def test_bundle_error_prefixes_candidates_with_declared_subdir():
+    """marketplace monorepo：候选要接在已声明的子目录后面才能填回 skill_id。"""
+    data = build_zip(
+        [
+            ("repo-main-abc123/plugins/code-review/.claude-plugin/plugin.json", b"{}"),
+            ("repo-main-abc123/plugins/code-review/skills/triage/SKILL.md", MANIFEST),
+        ]
+    )
+    with pytest.raises(ArchiveError, match="指到 plugins/code-review/skills"):
+        read_skill_bundle(data, subdir="plugins/code-review")
+
+
 def test_bundle_ignores_manifests_nested_deeper():
     """catalog 模式 glob 的是 */SKILL.md，埋更深的不算成员，这里跟着它。"""
     data = build_zip([("a/SKILL.md", MANIFEST), ("b/nested/SKILL.md", MANIFEST)])
