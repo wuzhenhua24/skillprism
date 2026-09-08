@@ -168,6 +168,10 @@ SKILLPRISM_MAX_ATTEMPTS=3
 SKILLPRISM_RETRY_BACKOFF_SECONDS=30
 SKILLPRISM_RETRY_BACKOFF_MAX_SECONDS=300
 
+# 承载 HTML 报告的地址。配了之后结论里的 report_url 才是能点开的链接。
+# 用独立域名，别和管理系统同域——见下方"报告链接"一节
+SKILLPRISM_PUBLIC_BASE_URL=https://skillprism.internal
+
 # 内容来源：管理系统的 zip 下载接口（待对方提供后填写）
 SKILLPRISM_CONTENT_URL_TEMPLATE=
 SKILLPRISM_CONTENT_TOKEN=
@@ -188,6 +192,47 @@ sudo chmod 640 /etc/skillprism/service.env
 走 GitLab 源时，**只有 worker 需要能访问 GitLab**，API 进程不需要——出网受限
 的机器上给 worker 单独放行内网 GitLab 的域名即可。令牌只给 `read_repository`，
 并且不要放进 `SKILLPRISM_SCANNER_ENV`（下一段说的就是这条隔离）。
+
+### 报告链接
+
+配了 `SKILLPRISM_PUBLIC_BASE_URL`，结论里就带上
+`{base}/api/skills/{skill_id}/report?content_hash=…`，由最终用户直接点开。
+这改变了暴露面：在此之前 API 只被管理系统调用，现在其中一条路径要让用户的
+浏览器访问到。
+
+网关上**只放行 `/api/skills/*/report`**，其余端点仍然只对管理系统开放。
+在补上 API 鉴权（见文末）之前，这是唯一该对外开的路径。
+
+**这个域名要独立，不要和管理系统同域。** 报告是 SkillEvaluator 自生成的
+HTML，内容源头是用户上传的 skill。同域意味着它和管理系统共享 cookie 与
+localStorage——独立域名是这里唯一真正起隔离作用的一层，响应上那几个安全头
+（CSP / nosniff / no-referrer）挡的是资源加载与请求发起，挡不住脚本执行。
+详见 README 的「HTML 报告链接」。
+
+反代到 API 进程即可，不需要额外配置：
+
+```nginx
+server {
+    server_name skillprism.internal;
+    location /api/skills/ {
+        # 只有 /report 结尾的路径放行，其余交给管理系统那条链路
+        location ~ ^/api/skills/.+/report$ {
+            proxy_pass http://127.0.0.1:8000;
+        }
+        return 404;
+    }
+    location / { return 404; }
+}
+```
+
+`PUBLIC_BASE_URL` 填错不会有任何运行时异常，只会让每一条结论都带上一个点不
+开的链接，而链接会进管理系统的库。配完验证一次：
+
+```bash
+curl -s http://127.0.0.1:8000/api/skills/<skill_id>/evaluation | python3 -m json.tool | grep report_url
+```
+
+拿到的链接直接 curl 一遍，应当返回 200 与 HTML。
 
 出网受限的机器不需要额外配置：semgrep 的版本检查与 metrics 上报已经默认关掉
 （`SEMGREP_ENABLE_VERSION_CHECK=0`、`SEMGREP_SEND_METRICS=off`）。这两件事
@@ -516,6 +561,10 @@ worker 写的报告，所以两者必须同机。要真正横向扩展需要先�
 按优先级：
 
 1. **API 鉴权**——目前完全开放。在此之前只能绑 `127.0.0.1`，靠前置网关鉴权。
+   配了 `PUBLIC_BASE_URL` 之后 `/api/skills/*/report` 要对用户浏览器开放，
+   网关上单独放行这一条路径（见第五节「报告链接」）；用户点链接带不了服务
+   令牌，所以补鉴权时这条路径需要另一套方案——最省事的是签名 URL，
+   `storage.resolve` 的 docstring 里已经为对象存储预留了同一条路。
 2. ~~数据库迁移~~——已引入 Alembic。
 3. ~~报告保留策略~~——当前有意不做，见第八节的说明与三个坑。
 4. **监控**——目前只有 journald 日志，没有指标。至少要能看到任务失败率和积压量。

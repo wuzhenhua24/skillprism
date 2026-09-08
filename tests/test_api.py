@@ -217,6 +217,107 @@ def _seed_two_versions(skill_id: str, report_root: Path):
             )
 
 
+#: 承载报告的内网域名。进程绑的是 127.0.0.1，公开地址由前置网关决定。
+PUBLIC_BASE_URL = "https://skillprism.internal"
+
+
+@pytest.fixture
+def public_domain(client, monkeypatch):
+    """配上承载报告的域名。依赖 client 是为了排在它之后——它会重置配置。"""
+    monkeypatch.setenv("SKILLPRISM_PUBLIC_BASE_URL", PUBLIC_BASE_URL)
+    reset_settings()
+    return PUBLIC_BASE_URL
+
+
+def test_report_url_pins_the_hash_of_the_row_it_came_with(client, public_domain, tmp_path):
+    """链接必须钉死这条结论的 content_hash，不能是"该 skill 最近那条"。
+
+    不带 hash 的链接会随后续评测漂走：GitLab 接入下 skill_id 是长期不变的
+    仓库路径，多个 ref 的结论堆在同一个 ID 下。链接会进管理系统的库长期
+    存在，那时指错版本比现在难查得多。
+    """
+    skill_id = "group/repo:skills/log-triage"
+    _seed_two_versions(skill_id, tmp_path / "reports")
+
+    # 查询本身不带 hash，取到的是最近那条；链接要带的是**它**的 hash。
+    dto = client.get(f"/api/skills/{skill_id}/evaluation").json()
+
+    assert dto["content_hash"] == "hash-main"
+    assert dto["report_url"] == (
+        f"{PUBLIC_BASE_URL}/api/skills/group/repo:skills/log-triage"
+        "/report?content_hash=hash-main"
+    )
+
+
+def test_report_url_round_trips_to_that_report(client, public_domain, tmp_path):
+    """拼出来的链接得真能取到报告——skill_id 里的 / 和 : 都要原样保留。"""
+    from urllib.parse import urlsplit
+
+    skill_id = "group/repo:skills/log-triage"
+    _seed_two_versions(skill_id, tmp_path / "reports")
+
+    dto = client.get(
+        f"/api/skills/{skill_id}/evaluation", params={"content_hash": "hash-v1"}
+    ).json()
+    parts = urlsplit(dto["report_url"])
+    report = client.get(f"{parts.path}?{parts.query}")
+
+    assert report.status_code == 200
+    assert "v1.0.0" in report.text
+
+
+def test_report_url_is_null_without_public_base_url(client, tmp_path):
+    """没配域名就是 null，不能回落到存储 URI——那是服务器本地路径。"""
+    skill_id = "group/repo:skills/log-triage"
+    _seed_two_versions(skill_id, tmp_path / "reports")
+
+    dto = client.get(f"/api/skills/{skill_id}/evaluation").json()
+
+    assert dto["report_url"] is None
+    assert "file://" not in client.get(f"/api/skills/{skill_id}/evaluation").text
+
+
+def test_no_report_url_when_the_row_has_no_report(client, public_domain):
+    """宁可没有链接，也不给一个点开是 404 的链接——后者会被当成服务坏了。"""
+    import uuid
+
+    from skillprism.db import session_scope
+    from skillprism.models import EvaluationResult
+
+    with session_scope() as session:
+        session.add(
+            EvaluationResult(
+                id=str(uuid.uuid4()),
+                skill_id="2000705",
+                content_hash="hash-no-report",
+                status="error",
+                severity_counts={},
+                incomplete_scans=[],
+                report_html_uri=None,
+            )
+        )
+
+    dto = client.get("/api/skills/2000705/evaluation").json()
+
+    assert dto["report_url"] is None
+
+
+def test_report_response_carries_security_headers(client, tmp_path):
+    """报告是自生成 HTML、内容源头是用户上传的 skill，现在由用户直接点开。
+
+    这几个头挡不住注入的脚本执行（报告自己的内联脚本要 unsafe-inline），
+    挡的是资源加载与请求发起。真正的隔离是独立域名，见 app 里那段注释。
+    """
+    skill_id = "group/repo:skills/log-triage"
+    _seed_two_versions(skill_id, tmp_path / "reports")
+
+    report = client.get(f"/api/skills/{skill_id}/report", params={"content_hash": "hash-v1"})
+
+    assert report.status_code == 200
+    assert report.headers["x-content-type-options"] == "nosniff"
+    assert "default-src 'none'" in report.headers["content-security-policy"]
+
+
 def test_report_follows_content_hash(client, tmp_path):
     """结论查准了、点开报告却是另一份——补 content_hash 之前 /report 就是这样。
 

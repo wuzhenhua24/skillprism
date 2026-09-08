@@ -203,7 +203,13 @@ def save_result(
 
 
 def result_to_dto(row: EvaluationResult, *, report_url: str | None = None) -> EvaluationDTO:
-    """从数据库行重建对外 DTO。"""
+    """从数据库行重建对外 DTO。
+
+    ``report_url`` 由调用方给出（见 :func:`service.report_url_for`），**不回落到
+    ``row.report_html_uri``**。那是存储地址，形如
+    ``file:///opt/skillprism/var/reports/...``：管理系统拿到它什么也做不了，
+    还把我们的服务器路径漏了出去。没有公开地址时这个字段就该是 null。
+    """
     by_tier: dict[str, list[ValidatorOutcome]] = {}
     for detail in row.details:
         by_tier.setdefault(detail.tier, []).append(
@@ -248,6 +254,6 @@ def result_to_dto(row: EvaluationResult, *, report_url: str | None = None) -> Ev
             incomplete_scans=list(row.incomplete_scans or []),
         ),
         tiers=tiers,
-        report_url=report_url or row.report_html_uri,
+        report_url=report_url,
         error=row.error,
     )

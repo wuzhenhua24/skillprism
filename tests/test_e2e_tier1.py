@@ -29,7 +29,7 @@ from skillprism.db import init_db, reset_engine, session_scope
 from skillprism.domain import EvaluationStatus
 from skillprism.runner import preflight
 from skillprism.schemas import SubmitRequest
-from skillprism.service import get_evaluation, submit
+from skillprism.service import get_evaluation, lookup_result, submit
 from skillprism.storage import LocalReportStorage
 from skillprism.worker import run_once
 
@@ -217,16 +217,48 @@ def test_finding_paths_never_leak_internal_directories(env):
 
 @needs_cli
 def test_reports_are_persisted_and_readable(env):
-    """HTML 与 JSON 报告都要落到存储里，且能读回。"""
-    dto = _evaluate(env)
+    """HTML 与 JSON 报告都要落到存储里，且能读回。
 
-    assert dto.report_url, "没有生成 HTML 报告链接"
-    report = LocalReportStorage(env.report_root).resolve(dto.report_url)
+    存储地址从**结果行**读，不从 DTO 读：DTO 的 ``report_url`` 是给管理系统
+    看的公开链接，没配公开域名时为 null。这里要验的是文件确实落了盘。
+    """
+    _evaluate(env)
+
+    with session_scope() as db:
+        report_html_uri = lookup_result(db, SKILL_ID).report_html_uri
+
+    report = LocalReportStorage(env.report_root).resolve(report_html_uri)
     assert report is not None and report.exists()
     assert report.read_text(encoding="utf-8").lstrip().lower().startswith("<!doctype html")
 
     saved = sorted(p.name for p in env.report_root.rglob("*") if p.is_file())
     assert saved == ["report.html", "report.json"]
+
+
+@needs_cli
+def test_public_report_url_never_carries_the_storage_path(env):
+    """对外的 report_url 要么是公开链接、要么是 null，绝不是存储地址。
+
+    存储地址形如 ``file:///var/lib/skillprism/reports/…``：管理系统拿到它
+    什么也做不了，还把我们的服务器路径漏了出去。这里连着真实跑出来的报告
+    验一遍——单测里 report_html_uri 是构造的，看不出真实形态。
+    """
+    from urllib.parse import quote
+
+    _evaluate(env)
+
+    with session_scope() as db:
+        without_domain = get_evaluation(db, SKILL_ID)
+        with_domain = get_evaluation(
+            db, SKILL_ID, public_base_url="https://skillprism.internal"
+        )
+
+    assert without_domain.report_url is None
+    assert with_domain.report_url.startswith(
+        f"https://skillprism.internal/api/skills/{SKILL_ID}/report?"
+    )
+    # 链接钉住的是这条结论自己的 hash，不是"该 skill 最近那条"。
+    assert quote(with_domain.content_hash, safe="") in with_domain.report_url
 
 
 @needs_cli

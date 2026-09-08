@@ -89,6 +89,9 @@ class EvaluationDTO(BaseModel):
     severity_counts: dict[Severity, int] = Field(default_factory=dict)
     evaluator: EvaluatorInfo = Field(default_factory=EvaluatorInfo)
     tiers: TierBundle = Field(default_factory=TierBundle)
+    #: HTML 报告的公开地址，可直接给最终用户点开。链接钉住这条结论的
+    #: content_hash，不会随后续评测漂走。服务端没配公开域名、或这条结论
+    #: 没有报告时为 null——不会回落到内部存储地址。
     report_url: str | None = None
     #: status 为 ERROR 时说明原因。
     error: str | None = None

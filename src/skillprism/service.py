@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from urllib.parse import quote, urlencode
 
 from sqlalchemy.orm import Session
 
@@ -120,16 +121,45 @@ def lookup_result(
     return latest_result(session, skill_id)
 
 
+def report_url_for(row: EvaluationResult, public_base_url: str) -> str | None:
+    """这条结论的 HTML 报告的公开地址。
+
+    **一定带上 content_hash。** 不带的话链接的含义是"这个 skill 最近评完的
+    那条"，会随后续评测漂走——GitLab 接入下 skill_id 是长期不变的仓库路径，
+    多个 ref 的结论堆在同一个 ID 下（同一条理由见 :func:`lookup_result`）。
+    链接一旦回给管理系统就会进它们的库、长期存在，那时"指错版本"比现在
+    难查得多。
+
+    没配公开地址、或这条结论压根没有报告时返回 None。宁可没有链接，也不
+    给一个点开是 404 的链接——后者会被当成服务坏了。
+    """
+    if not public_base_url or not row.report_html_uri:
+        return None
+    # skill_id 可能含 ``/``（GitLab 接入下它就是仓库路径），而路由是
+    # ``{skill_id:path}``，斜杠必须保留字面量；``:`` 在路径段里合法，一并
+    # 放行。其余照常编码——一个没编码的 ``?`` 或 ``#`` 会把后面的查询串截掉。
+    path = quote(row.skill_id, safe="/:")
+    query = urlencode({"content_hash": row.content_hash})
+    return f"{public_base_url.rstrip('/')}/api/skills/{path}/report?{query}"
+
+
 def get_evaluation(
     session: Session,
     skill_id: str,
     *,
     content_hash: str | None = None,
+    public_base_url: str = "",
 ) -> EvaluationDTO | None:
+    """取一条结论。``public_base_url`` 决定 ``report_url`` 拼不拼得出来。
+
+    公开地址由调用方传进来而不是在这里读全局配置，和 :func:`submit` 收
+    ``version_selects_content`` 是同一个理由：查询路径要能在测试里两种配置
+    都跑到，不该依赖进程级的全局状态。
+    """
     row = lookup_result(session, skill_id, content_hash=content_hash)
     if row is None:
         return None
-    return result_to_dto(row)
+    return result_to_dto(row, report_url=report_url_for(row, public_base_url))
 
 
 def report_path(uri: str | None) -> Path | None:

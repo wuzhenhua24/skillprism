@@ -50,6 +50,12 @@ class Settings(BaseSettings):
     #: 下载体积上限。解压前先卡住，避免拉一个超大响应体进内存。
     max_download_bytes: int = 64 * 1024 * 1024
 
+    #: 承载本服务的公开地址，例 https://skillprism.internal。配了之后结果
+    #: DTO 的 report_url 才是一个能点开的链接；留空则该字段为 null。
+    #: 这里只放"对外怎么访问到我们"，与内容来源无关——服务自己进程绑的是
+    #: 127.0.0.1，公开地址由前置网关决定，进程无从得知。
+    public_base_url: str = ""
+
     # ---- 内容来源：GitLab 归档接口 ----
     #: GitLab 实例地址，例 https://gitlab.internal。配了就走 GitLab 源，
     #: 与 CONTENT_URL_TEMPLATE 互斥（见 content.build_content_source）。
@@ -116,6 +122,20 @@ class Settings(BaseSettings):
             return value
         if not value.startswith(("http://", "https://")):
             raise ValueError(f"SKILLPRISM_GITLAB_BASE_URL 必须是 http(s) 地址：{value!r}")
+        return value.rstrip("/")
+
+    @field_validator("public_base_url")
+    @classmethod
+    def _public_base_url_is_http(cls, value: str) -> str:
+        """同 gitlab_base_url：写错的地址要在启动时就挡住。
+
+        这个尤其值得当场报错——拼错了不会有任何运行时异常，只会让每一条
+        结论都带上一个点不开的链接，而链接会进管理系统的库长期存在。
+        """
+        if not value:
+            return value
+        if not value.startswith(("http://", "https://")):
+            raise ValueError(f"SKILLPRISM_PUBLIC_BASE_URL 必须是 http(s) 地址：{value!r}")
         return value.rstrip("/")
 
     @field_validator("gitlab_token_header")

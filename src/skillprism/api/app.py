@@ -111,6 +111,34 @@ def get_task(task_id: str, session: Session = Depends(get_db)) -> dict:
     }
 
 
+#: 报告响应的安全头。报告是 SkillEvaluator 自生成的 HTML，内容源头是用户
+#: 上传的 skill，而它现在挂在我们自己的域名下、由最终用户直接点开。
+#:
+#: 实测（skillevaluator 0.2.1）：正文渲染做了 HTML 转义，但报告末尾把整份
+#: JSON 原样嵌在 ``<script id="report-data" type="application/json">`` 里，
+#: 那个位置**没有**转义——只要有字面量 ``</script`` 进去，块就被提前闭合。
+#: 试过的两条回显通道（死链目标、代码块正文）都没能把它送进去，所以没有
+#: 证明可利用；但挡住它的是上游各通道顺手做的归一化，不是那个位置有转义。
+#:
+#: 这几个头能做的和不能做的要说清楚：``default-src 'none'`` 挡住资源加载与
+#: 请求发起（fetch / img / form），``script-src 'unsafe-inline'`` 是报告自己
+#: 的内联脚本要用的，所以**挡不住注入的脚本执行**，也挡不住它靠跳转把数据
+#: 带走。真正的隔离是把报告放在独立域名下——那样它拿不到管理系统的 cookie
+#: 与 localStorage。
+#:
+#: 报告是完全自包含的（无外链资源、无 fetch/XHR，一个内联 style 加一个内联
+#: script），所以这套 CSP 不影响它正常渲染。
+REPORT_SECURITY_HEADERS = {
+    "Content-Security-Policy": (
+        "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; "
+        "img-src data:; base-uri 'none'; form-action 'none'"
+    ),
+    "X-Content-Type-Options": "nosniff",
+    # 报告地址里带着 skill_id 与 content_hash，别随跳转漏出去。
+    "Referrer-Policy": "no-referrer",
+}
+
+
 def _no_result_detail(content_hash: str | None) -> str:
     """带了 content_hash 却查不到，与"这个 skill 从没评过"是两回事。
 
@@ -128,7 +156,12 @@ def get_evaluation(
     content_hash: str | None = None,
     session: Session = Depends(get_db),
 ) -> EvaluationDTO:
-    dto = service.get_evaluation(session, skill_id, content_hash=content_hash)
+    dto = service.get_evaluation(
+        session,
+        skill_id,
+        content_hash=content_hash,
+        public_base_url=get_settings().public_base_url,
+    )
     if dto is None:
         raise HTTPException(status_code=404, detail=_no_result_detail(content_hash))
     return dto
@@ -143,7 +176,9 @@ def get_report(
     """回传 SkillEvaluator 生成的 HTML 报告。
 
     这是自生成 HTML，管理系统应以沙箱化 iframe 或独立页面承载，
-    不要内联进自身 DOM。
+    不要内联进自身 DOM。配了 ``SKILLPRISM_PUBLIC_BASE_URL`` 之后，这个地址
+    会作为 ``report_url`` 随结论一起回给管理系统，由最终用户直接点开——
+    所以响应带上 :data:`REPORT_SECURITY_HEADERS`。
 
     ``content_hash`` 与 ``/evaluation`` 同义，两边必须一起带：只在一边带，
     拿到的结论和报告可能来自不同版本。
@@ -153,4 +188,4 @@ def get_report(
     if path is None:
         detail = "报告不存在" if row else _no_result_detail(content_hash)
         raise HTTPException(status_code=404, detail=detail)
-    return FileResponse(path, media_type="text/html")
+    return FileResponse(path, media_type="text/html", headers=REPORT_SECURITY_HEADERS)

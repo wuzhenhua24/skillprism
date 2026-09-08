@@ -436,6 +436,67 @@ zip 接入每次上传换一个资源 ID，一个 `skill_id` 基本只有一条�
 查准了、点开报告却是另一份"——补 `content_hash` 之前的 `/report` 就是这样，
 由 `test_report_follows_content_hash` 钉住。
 
+### HTML 报告链接（`report_url`）
+
+配上承载报告的地址，结论里的 `report_url` 就是一个能直接点开的链接：
+
+```bash
+SKILLPRISM_PUBLIC_BASE_URL=https://skillprism.internal
+```
+
+```json
+{
+  "skill_id": "group/repo:skills/log-triage",
+  "content_hash": "sha256:9f2c…",
+  "report_url": "https://skillprism.internal/api/skills/group/repo:skills/log-triage/report?content_hash=sha256:9f2c…"
+}
+```
+
+**链接一定带 `content_hash`，而且带的是这条结论自己的那个。** 不带的话它的
+含义是"这个 skill 最近评完的那条"，会随后续评测漂走——理由和上面那节完全
+一样。区别在于链接会进管理系统的库、长期存在，到那时候"指错版本"比现在难查
+得多。`test_report_url_pins_the_hash_of_the_row_it_came_with` 钉住这条。
+
+**没配就是 `null`，不回落到存储地址。** 存储地址形如
+`file:///var/lib/skillprism/reports/…`，对方拿到什么也做不了，还把我们的
+服务器路径漏了出去。同理，结论没有报告时（例如 `error`）这个字段也是 null：
+宁可没有链接，也不给一个点开是 404 的链接——后者会被当成服务坏了。
+
+**地址由前置网关决定，进程无从得知**，所以这是一个显式配置项，不是从请求头
+推断的。写错了不会有任何运行时异常，只会让每一条结论都带上一个点不开的链接，
+所以启动时就校验它是不是 http(s) 地址。
+
+**用独立域名承载，别和管理系统同域。** 报告是 SkillEvaluator 自生成的 HTML，
+内容源头是用户上传的 skill，而它现在由最终用户直接点开。同域意味着它和管理
+系统共享 cookie 与 localStorage；独立域名是这里唯一真正起隔离作用的一层。
+
+响应带三个安全头（`api/app.py` 的 `REPORT_SECURITY_HEADERS`）：
+`Content-Security-Policy: default-src 'none'; script-src 'unsafe-inline'; …`、
+`X-Content-Type-Options: nosniff`、`Referrer-Policy: no-referrer`。要清楚它们
+能做什么：CSP 挡住资源加载与请求发起（fetch / img / form），但 `unsafe-inline`
+是报告自己的内联脚本要用的，所以**挡不住注入的脚本执行**，也挡不住它靠跳转
+把数据带走。
+
+这不是假想的风险。实测 skillevaluator 0.2.1 生成的报告：正文渲染做了 HTML
+转义（`'` 输出成 `&#39;`），但报告末尾把整份 JSON **原样**嵌在
+`<script id="report-data" type="application/json">` 里，那个位置没有转义——
+只要有字面量 `</script` 进去，块就被提前闭合。试过的两条回显通道（死链目标、
+代码块正文）都没能把它送进去：前者被 URL 编码成了 `%3C/script%3E`，后者压根
+没进报告。**所以没有证明它可利用**，但挡住它的是上游各通道顺手做的归一化，
+不是那个位置有转义，换个上游版本就不一定。
+
+报告本身是完全自包含的（无外链资源、无 fetch/XHR，一个内联 style 加一个内联
+script），这套 CSP 不影响它渲染——已在浏览器里实跑验证，暗色切换与导出按钮
+都正常，无 CSP 违规。
+
+另外报告页眉会显示物化目录的绝对路径（含 work 目录与任务 UUID）。那是上游
+生成的，我们只在 DTO 的 finding 里做了归一化。不影响功能，但确实把内部路径
+展示给了最终用户。
+
+**链接发出去之后，报告就不能随便删了。** `storage.py` 里已经写了清理必须先做
+引用计数；链接进了管理系统的库之后，这条约束从内部正确性变成用户可见的死链。
+目前还没有清理机制，做的时候要一起算。
+
 ### 一组耦合 skill
 
 一套研发工作流常拆成几个 skill，彼此有跨目录引用。这种情况**必须整套一起评**，
@@ -614,4 +675,6 @@ SKILL_EVAL_EMBEDDING_API_KEY=<ARK_API_KEY>
   需要先和上游定一个声明依赖的约定。
 - **结果回调**：当前只支持轮询。前提是触发方与展示方都是管理系统；触发方
   改成 CI / push webhook 时需要重新评估，见上面「结果怎么回去」。
-- **鉴权**：API 尚无认证，接入前需补。
+- **鉴权**：API 尚无认证，接入前需补。配了 `PUBLIC_BASE_URL` 之后
+  `/api/skills/*/report` 需要被最终用户的浏览器访问到，网关上要单独放行
+  这一条路径，其余端点仍然只对管理系统开放。
