@@ -24,6 +24,7 @@ from skillprism.content import LocalDirectorySource
 from skillprism.db import init_db, reset_engine, session_scope
 from skillprism.domain import EvaluationStatus
 from skillprism.schemas import SubmitRequest
+from skillprism.domain import ContentSource
 from skillprism.service import get_evaluation, submit
 from skillprism.storage import LocalReportStorage
 from skillprism.worker import run_once
@@ -115,8 +116,10 @@ def _run(settings, request: SubmitRequest) -> None:
     source = LocalDirectorySource(settings.local_skills_root)
     storage = LocalReportStorage(settings.report_root)
     with session_scope() as db:
-        submit(db, request)
-    assert run_once(settings=settings, source=source, storage=storage), "worker 没有取到任务"
+        submit(db, request, source=ContentSource.LOCAL)
+    assert run_once(
+        settings=settings, content_source=source, storage=storage
+    ), "worker 没有取到任务"
 
 
 def _problems(dto, validator_fragment: str) -> list[str]:
@@ -145,7 +148,7 @@ def test_alone_reports_dead_link(env):
     """
     _run(env, SubmitRequest(skill_id="code-review", skill_name="code-review"))
     with session_scope() as db:
-        dto = get_evaluation(db, "code-review")
+        dto = get_evaluation(db, ContentSource.LOCAL, "code-review")
 
     assert dto is not None
     messages = _problems(dto, "integrity")
@@ -160,7 +163,7 @@ def test_bundle_resolves_cross_skill_links(env):
 
     with session_scope() as db:
         for member in MEMBERS:
-            dto = get_evaluation(db, f"{BUNDLE_ID}/{member}")
+            dto = get_evaluation(db, ContentSource.LOCAL, f"{BUNDLE_ID}/{member}")
             assert dto is not None, f"成员 {member} 没有结果"
             assert dto.status is not EvaluationStatus.ERROR, dto.error
             dead = [m for m in _problems(dto, "integrity") if "SKILL.md" in m or "api.md" in m]
@@ -177,9 +180,9 @@ def test_bundle_stores_one_result_per_member(env):
     _run(env, SubmitRequest(skill_id=BUNDLE_ID, skill_name=BUNDLE_ID, bundle=True))
 
     with session_scope() as db:
-        dtos = {m: get_evaluation(db, f"{BUNDLE_ID}/{m}") for m in MEMBERS}
+        dtos = {m: get_evaluation(db, ContentSource.LOCAL, f"{BUNDLE_ID}/{m}") for m in MEMBERS}
         # bundle 的 id 本身不挂结论——它不是一个 skill。
-        assert get_evaluation(db, BUNDLE_ID) is None
+        assert get_evaluation(db, ContentSource.LOCAL, BUNDLE_ID) is None
 
     assert all(dto is not None for dto in dtos.values())
     # 成员各自的内容指纹不同，但共享同一个上下文指纹。
@@ -202,8 +205,8 @@ def test_bundle_context_is_not_reused_across_shapes(env):
     _run(env, SubmitRequest(skill_id=BUNDLE_ID, skill_name=BUNDLE_ID, bundle=True))
 
     with session_scope() as db:
-        solo = get_evaluation(db, "code-review")
-        in_bundle = get_evaluation(db, f"{BUNDLE_ID}/code-review")
+        solo = get_evaluation(db, ContentSource.LOCAL, "code-review")
+        in_bundle = get_evaluation(db, ContentSource.LOCAL, f"{BUNDLE_ID}/code-review")
 
     assert solo is not None and in_bundle is not None
     # 同样的字节 → 同样的 content_hash；但上下文不同，结论各自独立。

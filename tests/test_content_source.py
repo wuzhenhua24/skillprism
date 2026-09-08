@@ -15,10 +15,12 @@ from skillprism.content import (
     SkillNotFoundError,
     ZipArchiveSource,
     build_content_source,
+    resolve_source_kind,
     split_skill_id,
     validate_ref,
 )
 from skillprism.config import Settings
+from skillprism.domain import ContentSource
 
 TEMPLATE = "https://mgmt.example/api/skills/{skill_id}/download"
 GITLAB = "https://gitlab.internal"
@@ -274,3 +276,29 @@ def test_factory_rejects_both_sources_configured():
     settings = Settings(gitlab_base_url=GITLAB, content_url_template=TEMPLATE)
     with pytest.raises(ValueError, match="只能配一个"):
         build_content_source(settings)
+
+
+@pytest.mark.parametrize(
+    ("settings", "expected"),
+    [
+        (Settings(gitlab_base_url=GITLAB), ContentSource.GITLAB),
+        (Settings(content_url_template=TEMPLATE), ContentSource.ZIP),
+        (Settings(), ContentSource.LOCAL),
+    ],
+)
+def test_resolve_source_kind_maps_config_to_the_enum(settings, expected):
+    """判定只有这一处。提交路径（写进任务）、worker（选实现）、查询路径
+    （定位结论）都问它——各判各的早晚会分叉，那种分叉的表现是"结论存在
+    A 名下、查询去 B 名下找"。"""
+    assert resolve_source_kind(settings) is expected
+
+
+def test_version_selects_content_is_a_property_of_the_source():
+    """``skill_version`` 是不是"选内容"取决于来源，不取决于部署。
+
+    zip 下它是用户手填的标签，GitLab 下它是 ref。挂在配置上的写法只在
+    "一个进程一种来源"时成立。
+    """
+    assert ContentSource.GITLAB.version_selects_content is True
+    assert ContentSource.ZIP.version_selects_content is False
+    assert ContentSource.LOCAL.version_selects_content is False

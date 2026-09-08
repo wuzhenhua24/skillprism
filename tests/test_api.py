@@ -204,6 +204,7 @@ def _seed_two_versions(skill_id: str, report_root: Path):
             session.add(
                 EvaluationResult(
                     id=str(uuid.uuid4()),
+                    source="local",
                     skill_id=skill_id,
                     skill_version=ref,
                     content_hash=content_hash,
@@ -288,6 +289,7 @@ def test_no_report_url_when_the_row_has_no_report(client, public_domain):
         session.add(
             EvaluationResult(
                 id=str(uuid.uuid4()),
+                source="local",
                 skill_id="2000705",
                 content_hash="hash-no-report",
                 status="error",

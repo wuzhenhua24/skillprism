@@ -58,7 +58,7 @@ class Settings(BaseSettings):
 
     # ---- 内容来源：GitLab 归档接口 ----
     #: GitLab 实例地址，例 https://gitlab.internal。配了就走 GitLab 源，
-    #: 与 CONTENT_URL_TEMPLATE 互斥（见 content.build_content_source）。
+    #: 与 CONTENT_URL_TEMPLATE 互斥（见 content.resolve_source_kind）。
     gitlab_base_url: str = ""
     #: 只读令牌。权限给到 read_repository 即可，不要给 api。
     #: 不要放进 SCANNER_ENV——那是注给评测子进程的，公司凭据不进那一层。
@@ -152,20 +152,6 @@ class Settings(BaseSettings):
         """启动时就校验格式。写错了要当场报错，不能到评测时才静默丢掉。"""
         parse_scanner_env(value)
         return value
-
-    @property
-    def version_selects_content(self) -> bool:
-        """``skill_version`` 是否决定取到的是哪份内容。
-
-        zip 接入下它是用户上传时手填的标签，内容由 ``skill_id`` 决定，
-        同一个 skill 换个版本号仍然取到同一份内容；GitLab 接入下它是 ref，
-        直接决定取到哪个 commit。
-
-        排队去重的键因此不同：前者可以把新触发折叠进旧任务并刷新版本标签，
-        后者这么做等于宣称评了 v1、给出的却是 v2 的结论。见
-        :func:`skillprism.queue.find_queued`。
-        """
-        return bool(self.gitlab_base_url)
 
     def scanner_env_pairs(self) -> dict[str, str]:
         return parse_scanner_env(self.scanner_env)

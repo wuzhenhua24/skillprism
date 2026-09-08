@@ -7,7 +7,7 @@ import uuid
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from skillprism.domain import EvaluationStatus, Severity, Tier
+from skillprism.domain import ContentSource, EvaluationStatus, Severity, Tier
 from skillprism.models import EvaluationDetail, EvaluationResult
 from skillprism.schemas import (
     EvaluationDTO,
@@ -19,18 +19,27 @@ from skillprism.schemas import (
 )
 
 
-def find_result(session: Session, skill_id: str, content_hash: str) -> EvaluationResult | None:
+def find_result(
+    session: Session, source: ContentSource, skill_id: str, content_hash: str
+) -> EvaluationResult | None:
+    """按身份精确定位一条结论。身份是 (来源, skill_id, content_hash)。"""
     stmt = select(EvaluationResult).where(
+        EvaluationResult.source == str(source),
         EvaluationResult.skill_id == skill_id,
         EvaluationResult.content_hash == content_hash,
     )
     return session.execute(stmt).scalar_one_or_none()
 
 
-def latest_result(session: Session, skill_id: str) -> EvaluationResult | None:
+def latest_result(
+    session: Session, source: ContentSource, skill_id: str
+) -> EvaluationResult | None:
     stmt = (
         select(EvaluationResult)
-        .where(EvaluationResult.skill_id == skill_id)
+        .where(
+            EvaluationResult.source == str(source),
+            EvaluationResult.skill_id == skill_id,
+        )
         .order_by(EvaluationResult.evaluated_at.desc())
         .limit(1)
     )
@@ -45,7 +54,7 @@ def find_reusable_result(
     policy_file_hash: str,
     context_hash: str | None = None,
 ) -> EvaluationResult | None:
-    """找一条可以直接复用的结论。**刻意不看 skill_id。**
+    """找一条可以直接复用的结论。**刻意不看 skill_id，也不看 source。**
 
     管理系统每次上传都会产生新的资源 ID，所以 (skill_id, content_hash) 的
     缓存跨上传永远不命中。而它们的上传表单里版本号是**单独填的**——传同一个
@@ -72,6 +81,11 @@ def find_reusable_result(
     上下文必须精确相等才复用——包括 NULL 与非 NULL 不互认：同一个 skill
     单独评（兄弟目录不在盘上，跨 skill 链接是死链）和在一组里评，结论本来
     就不一样，互相复用会给出一个在当前上下文下并不成立的结论。
+
+    ``source`` 不进条件，和 ``skill_id`` 是同一个理由：结论只取决于内容、
+    评测器和策略。同一份字节从 zip 传上来还是从 GitLab 取下来，评出来就该
+    是同一个结论，跨来源复用是对的。**身份**要分来源（谁的 skill_id），
+    **结论**不必分。
     """
     if not policy_file_hash:
         return None
@@ -95,41 +109,47 @@ def find_reusable_result(
 
 def clone_result(
     session: Session,
-    source: EvaluationResult,
+    origin: EvaluationResult,
     *,
+    source: ContentSource,
     skill_id: str,
     skill_version: str | None,
 ) -> EvaluationResult:
-    """把一条既有结论挂到另一个资源 ID 上。
+    """把一条既有结论挂到另一个身份上。
 
     报告按 (content_hash, context_hash) 寻址（见 storage.py），两者都相同才
     共用 URI，所以这里直接复用不复制文件。
     ``evaluated_at`` 保持原值——评测确实是那时候跑的，改掉它等于谎报。
+
+    ``source`` 取的是**本次任务**的来源，不是 ``origin`` 的：跨来源复用是
+    允许的（见 :func:`find_reusable_result`），但克隆出来的这条要挂在本次
+    触发的命名空间下，否则它在自己的来源里查不到。
     """
     row = EvaluationResult(
         id=str(uuid.uuid4()),
+        source=str(source),
         skill_id=skill_id,
         skill_version=skill_version,
-        content_hash=source.content_hash,
+        content_hash=origin.content_hash,
         # 上下文必须跟着走：丢掉的话这条克隆看起来就是"单独评出来的"，
         # 之后按上下文找复用会命中一条其实来自别的上下文的结论。
-        context_hash=source.context_hash,
-        status=source.status,
-        gate_passed=source.gate_passed,
-        score=source.score,
-        grade=source.grade,
-        severity_counts=dict(source.severity_counts or {}),
-        evaluator_version=source.evaluator_version,
-        profile=source.profile,
-        policy_digest=source.policy_digest,
-        policy_file_hash=source.policy_file_hash,
-        incomplete_scans=list(source.incomplete_scans or []),
-        report_json_uri=source.report_json_uri,
-        report_html_uri=source.report_html_uri,
-        error=source.error,
-        evaluated_at=source.evaluated_at,
+        context_hash=origin.context_hash,
+        status=origin.status,
+        gate_passed=origin.gate_passed,
+        score=origin.score,
+        grade=origin.grade,
+        severity_counts=dict(origin.severity_counts or {}),
+        evaluator_version=origin.evaluator_version,
+        profile=origin.profile,
+        policy_digest=origin.policy_digest,
+        policy_file_hash=origin.policy_file_hash,
+        incomplete_scans=list(origin.incomplete_scans or []),
+        report_json_uri=origin.report_json_uri,
+        report_html_uri=origin.report_html_uri,
+        error=origin.error,
+        evaluated_at=origin.evaluated_at,
     )
-    for detail in source.details:
+    for detail in origin.details:
         row.details.append(
             EvaluationDetail(
                 validator_name=detail.validator_name,
@@ -149,18 +169,24 @@ def save_result(
     session: Session,
     dto: EvaluationDTO,
     *,
+    source: ContentSource,
     report_json_uri: str | None = None,
     report_html_uri: str | None = None,
     policy_file_hash: str | None = None,
 ) -> EvaluationResult:
-    """写入结果。同一 (skill_id, content_hash) 覆盖既有记录。"""
-    existing = find_result(session, dto.skill_id, dto.content_hash)
+    """写入结果。同一 (source, skill_id, content_hash) 覆盖既有记录。
+
+    ``source`` 必须进覆盖判定：不带的话，GitLab 上 ``group/repo`` 的结论会
+    删掉管理系统里恰好也叫 ``group/repo`` 的那条，删得静悄悄。
+    """
+    existing = find_result(session, source, dto.skill_id, dto.content_hash)
     if existing is not None:
         session.delete(existing)
         session.flush()
 
     row = EvaluationResult(
         id=str(uuid.uuid4()),
+        source=str(source),
         skill_id=dto.skill_id,
         skill_version=dto.skill_version,
         content_hash=dto.content_hash,

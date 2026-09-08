@@ -29,6 +29,7 @@ from skillprism.db import init_db, reset_engine, session_scope
 from skillprism.domain import EvaluationStatus
 from skillprism.runner import preflight
 from skillprism.schemas import SubmitRequest
+from skillprism.domain import ContentSource
 from skillprism.service import get_evaluation, lookup_result, submit
 from skillprism.storage import LocalReportStorage
 from skillprism.worker import run_once
@@ -129,12 +130,15 @@ def _evaluate(
                 skill_version=version,
                 force=force,
             ),
+            source=ContentSource.LOCAL,
         )
 
-    assert run_once(settings=settings, source=source, storage=storage), "worker 没有取到任务"
+    assert run_once(
+        settings=settings, content_source=source, storage=storage
+    ), "worker 没有取到任务"
 
     with session_scope() as db:
-        return get_evaluation(db, skill_id)
+        return get_evaluation(db, ContentSource.LOCAL, skill_id)
 
 
 def _check_names(dto) -> list[str]:
@@ -225,7 +229,7 @@ def test_reports_are_persisted_and_readable(env):
     _evaluate(env)
 
     with session_scope() as db:
-        report_html_uri = lookup_result(db, SKILL_ID).report_html_uri
+        report_html_uri = lookup_result(db, ContentSource.LOCAL, SKILL_ID).report_html_uri
 
     report = LocalReportStorage(env.report_root).resolve(report_html_uri)
     assert report is not None and report.exists()
@@ -248,9 +252,9 @@ def test_public_report_url_never_carries_the_storage_path(env):
     _evaluate(env)
 
     with session_scope() as db:
-        without_domain = get_evaluation(db, SKILL_ID)
+        without_domain = get_evaluation(db, ContentSource.LOCAL, SKILL_ID)
         with_domain = get_evaluation(
-            db, SKILL_ID, public_base_url="https://skillprism.internal"
+            db, ContentSource.LOCAL, SKILL_ID, public_base_url="https://skillprism.internal"
         )
 
     assert without_domain.report_url is None
@@ -355,10 +359,17 @@ def test_missing_skill_fails_task_without_result(env):
     """
     source = LocalDirectorySource(env.local_skills_root)
     with session_scope() as db:
-        task = task_queue.enqueue(db, skill_id="does-not-exist", skill_name="does-not-exist")
+        task = task_queue.enqueue(
+            db,
+            source=ContentSource.LOCAL,
+            skill_id="does-not-exist",
+            skill_name="does-not-exist",
+        )
         task_id = task.id
 
-    run_once(settings=env, source=source, storage=LocalReportStorage(env.report_root))
+    run_once(
+        settings=env, content_source=source, storage=LocalReportStorage(env.report_root)
+    )
 
     with session_scope() as db:
         from skillprism.models import EvaluationTask
@@ -366,7 +377,7 @@ def test_missing_skill_fails_task_without_result(env):
         refreshed = db.get(EvaluationTask, task_id)
         assert refreshed.state == "failed"
         assert refreshed.error
-        assert get_evaluation(db, "does-not-exist") is None
+        assert get_evaluation(db, ContentSource.LOCAL, "does-not-exist") is None
 
 
 def test_preflight_reports_scanner_state():

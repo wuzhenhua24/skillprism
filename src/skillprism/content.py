@@ -18,6 +18,7 @@ from urllib.parse import quote, urlencode
 import httpx
 
 from skillprism.archive import ArchiveError, read_skill_bundle, read_skill_zip
+from skillprism.domain import ContentSource
 from skillprism.materialize import (
     MAX_FILE_BYTES,
     SKILL_MANIFEST,
@@ -288,8 +289,9 @@ class GitLabArchiveSource:
     * ``version`` → git ref（分支、tag 或 commit sha），留空则用默认分支。
 
     注意 ``version`` 在 zip 接入下是"用户手填的版本号"，在这里被重新解释成
-    ref。两种接入不会同时启用（见 :func:`build_content_source`），所以这个
-    重载不会在同一部署里产生歧义。
+    ref。这个重载之所以不产生歧义，是因为每个任务都记着自己的来源
+    （:class:`~skillprism.domain.ContentSource`），取内容时按它选实现——
+    而不是靠"一个部署只启用一种接入"。
     """
 
     def __init__(
@@ -377,16 +379,21 @@ class GitLabArchiveSource:
         return project, ref, subdir, data
 
 
-def build_content_source(settings) -> SkillContentSource:
-    """按配置选内容来源。
+def resolve_source_kind(settings) -> ContentSource:
+    """按配置判定本部署走哪种内容来源。
 
-    配了 ``SKILLPRISM_GITLAB_BASE_URL`` 走 GitLab 归档接口，配了
-    ``SKILLPRISM_CONTENT_URL_TEMPLATE`` 走管理系统的 zip 下载接口，
-    都没配则退回本地目录——后者只用于开发调试。
+    配了 ``SKILLPRISM_GITLAB_BASE_URL`` 是 GitLab 归档接口，配了
+    ``SKILLPRISM_CONTENT_URL_TEMPLATE`` 是管理系统的 zip 下载接口，
+    都没配则是本地目录——后者只用于开发调试。
 
     两个都配是配置写错了，当场报错而不是挑一个：两种接入对
     ``skill_id`` / ``skill_version`` 的解释不一样，选错了不会报错，只会
     默默评错东西。
+
+    判定单独抽出来，是因为**不止 worker 需要它**：提交路径要把来源写进任务
+    （它是身份的一部分，见 :class:`~skillprism.domain.ContentSource`），
+    查询路径要按来源定位结论。三处各判一次早晚会分叉，那种分叉的表现正是
+    "结论存在 A 名下、查询去 B 名下找"。
     """
     if settings.gitlab_base_url and settings.content_url_template:
         raise ValueError(
@@ -394,6 +401,16 @@ def build_content_source(settings) -> SkillContentSource:
             "只能配一个：两者对 skill_id/skill_version 的解释不同"
         )
     if settings.gitlab_base_url:
+        return ContentSource.GITLAB
+    if settings.content_url_template:
+        return ContentSource.ZIP
+    return ContentSource.LOCAL
+
+
+def build_content_source(settings) -> SkillContentSource:
+    """按配置造出内容来源的客户端。来源判定见 :func:`resolve_source_kind`。"""
+    kind = resolve_source_kind(settings)
+    if kind is ContentSource.GITLAB:
         return GitLabArchiveSource(
             settings.gitlab_base_url,
             token=settings.gitlab_token,
@@ -402,7 +419,7 @@ def build_content_source(settings) -> SkillContentSource:
             timeout=settings.content_timeout_seconds,
             max_bytes=settings.max_download_bytes,
         )
-    if settings.content_url_template:
+    if kind is ContentSource.ZIP:
         return ZipArchiveSource(
             settings.content_url_template,
             token=settings.content_token,

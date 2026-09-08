@@ -18,6 +18,7 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
+from skillprism.domain import ContentSource
 from skillprism.models import Base, EvaluationTask
 from skillprism.queue import claim_next, enqueue
 from tests.conftest import PG_ENV_VAR
@@ -53,7 +54,12 @@ def seeded(db_url):
 def _seed(factory, count: int) -> None:
     with factory() as session:
         for i in range(count):
-            enqueue(session, skill_id=f"skill-{i}", content_hash=f"sha256:{i}")
+            enqueue(
+                session,
+                source=ContentSource.LOCAL,
+                skill_id=f"skill-{i}",
+                content_hash=f"sha256:{i}",
+            )
         session.commit()
 
 

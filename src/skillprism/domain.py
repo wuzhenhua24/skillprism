@@ -18,6 +18,47 @@ class Tier(StrEnum):
     TIER3 = "tier3"
 
 
+class ContentSource(StrEnum):
+    """skill 内容从哪来。这是**身份的一部分**，不只是一项部署配置。
+
+    两种接入对 ``skill_id`` / ``skill_version`` 的解释不一样：zip 接入下
+    ``skill_id`` 是管理系统的资源 ID、``skill_version`` 是用户手填的标签；
+    GitLab 接入下 ``skill_id`` 是 ``项目[:子目录]``、``skill_version`` 是
+    git ref。所以同一个 ``skill_id`` 字符串在两边可能指向完全不同的东西——
+    管理系统的资源 ID ``42`` 和 GitLab 的数字项目 ID ``42`` 就是一例。
+
+    结论与排队都必须带上这一维。不带的话两个来源会在
+    ``uq_skill_content`` 上互相覆盖、在排队去重时互相折叠，而且全程不报错
+    ——又回到"不报错，只是评错"。
+    """
+
+    #: 开发用的本地目录（LocalDirectorySource）。它同样自成一个命名空间：
+    #: 本地调试留下的结论不该被生产接入的查询取到。
+    LOCAL = "local"
+    #: 管理系统的 zip 下载接口（ZipArchiveSource）。
+    ZIP = "zip"
+    #: GitLab 归档接口（GitLabArchiveSource）。
+    GITLAB = "gitlab"
+
+    @property
+    def version_selects_content(self) -> bool:
+        """``skill_version`` 是否决定取到的是哪份内容。
+
+        zip 接入下它是用户上传时手填的标签，内容由 ``skill_id`` 决定，
+        同一个 skill 换个版本号仍然取到同一份内容；GitLab 接入下它是 ref，
+        直接决定取到哪个 commit。
+
+        排队去重的键因此不同：前者可以把新触发折叠进旧任务并刷新版本标签，
+        后者这么做等于宣称评了 v1、给出的却是 v2 的结论。见
+        :func:`skillprism.queue.find_queued`。
+
+        挂在枚举上而不是 :class:`~skillprism.config.Settings` 上：它是**来源
+        的性质**，不是部署的性质。放在配置里的写法只在"一个进程一种来源"
+        时成立，两种接入并存后就没有正确取值了。
+        """
+        return self is ContentSource.GITLAB
+
+
 class EvaluationStatus(StrEnum):
     """评测状态。
 

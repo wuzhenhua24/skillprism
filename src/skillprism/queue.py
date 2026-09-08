@@ -15,7 +15,7 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
-from skillprism.domain import TaskState, Tier
+from skillprism.domain import ContentSource, TaskState, Tier
 from skillprism.models import EvaluationTask
 
 #: tier 到队列的路由。Tier 2/3 尚未实现，先占位以免将来改表。
@@ -28,13 +28,14 @@ QUEUE_BY_TIER = {
 
 def find_queued(
     session: Session,
+    source: ContentSource,
     skill_id: str,
     tier: Tier,
     *,
     skill_version: str | None = None,
     match_version: bool = False,
 ) -> EvaluationTask | None:
-    """找一条同 skill 同 tier、尚未开跑的任务。
+    """找一条同来源同 skill 同 tier、尚未开跑的任务。
 
     只看 queued，不看 running：running 的任务**已经下载过内容**，它跑的是
     更早的那一份。把新的触发折叠进去，就等于宣称评了新内容却给出旧结论。
@@ -44,9 +45,14 @@ def find_queued(
     ``match_version`` 为真时版本也进去重键。这是 GitLab 接入需要的：那里
     ``skill_version`` 是 ref，两个 ref 是两份内容，折叠会犯上面同一个错误
     ——只不过错在版本维度而不是时间维度。zip 接入下它是自由文本标签，
-    不进键，见 :attr:`Settings.version_selects_content`。
+    不进键，见 :attr:`ContentSource.version_selects_content`。
+
+    ``source`` 进键的理由更硬：两个来源的 ``skill_id`` 是两个命名空间，
+    撞上同一个字符串就会把 GitLab 的仓库路径折叠进一条 zip 任务，跑出来的
+    是另一个 skill 的结论。
     """
     conditions = [
+        EvaluationTask.source == str(source),
         EvaluationTask.skill_id == skill_id,
         EvaluationTask.tier == str(tier),
         EvaluationTask.state == str(TaskState.QUEUED),
@@ -72,6 +78,7 @@ def find_queued(
 def enqueue(
     session: Session,
     *,
+    source: ContentSource,
     skill_id: str,
     skill_name: str | None = None,
     skill_version: str | None = None,
@@ -86,6 +93,7 @@ def enqueue(
     """
     task = EvaluationTask(
         id=str(uuid.uuid4()),
+        source=str(source),
         skill_id=skill_id,
         skill_name=skill_name,
         skill_version=skill_version,

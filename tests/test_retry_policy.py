@@ -19,7 +19,7 @@ import pytest
 from skillprism.config import get_settings, reset_settings
 from skillprism.content import ContentFetchError, SkillNotFoundError
 from skillprism.db import init_db, reset_engine, session_scope
-from skillprism.domain import TaskState
+from skillprism.domain import ContentSource, TaskState
 from skillprism.models import EvaluationTask
 from skillprism.queue import claim_next
 from skillprism.schemas import SubmitRequest
@@ -66,7 +66,11 @@ def env(tmp_path, monkeypatch, db_url):
     init_db()
 
     with session_scope() as db:
-        submit(db, SubmitRequest(skill_id=SKILL_ID, skill_name=SKILL_ID))
+        submit(
+            db,
+            SubmitRequest(skill_id=SKILL_ID, skill_name=SKILL_ID),
+            source=ContentSource.LOCAL,
+        )
 
     yield settings
 
@@ -75,7 +79,9 @@ def env(tmp_path, monkeypatch, db_url):
 
 
 def _run(env, source) -> None:
-    run_once(settings=env, source=source, storage=LocalReportStorage(env.report_root))
+    run_once(
+        settings=env, content_source=source, storage=LocalReportStorage(env.report_root)
+    )
 
 
 def _task() -> EvaluationTask:

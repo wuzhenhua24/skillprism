@@ -20,6 +20,7 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
+from skillprism.domain import ContentSource
 from skillprism.models import Base, EvaluationDetail, EvaluationResult
 from skillprism.repository import clone_result, find_reusable_result
 
@@ -41,6 +42,7 @@ def factory(db_url):
 def _seed(session, **overrides) -> EvaluationResult:
     row = EvaluationResult(
         id=str(uuid.uuid4()),
+        source=overrides.pop("source", str(ContentSource.ZIP)),
         skill_id=overrides.pop("skill_id", "2000705"),
         skill_version=overrides.pop("skill_version", "1.0.0"),
         content_hash=overrides.pop("content_hash", CONTENT),
@@ -135,29 +137,35 @@ def test_legacy_rows_without_a_fingerprint_are_not_reused(factory):
 def test_clone_carries_the_verdict_but_takes_the_new_identity(factory):
     """复用要落成新资源 ID 名下的一行，否则按 ID 查结果的接口拿不到东西。"""
     with factory() as session:
-        source = _seed(session, skill_id="2000705", skill_version="1.0.0")
+        origin = _seed(session, skill_id="2000705", skill_version="1.0.0")
 
-        copy = clone_result(session, source, skill_id="2000706", skill_version="1.0.1")
+        copy = clone_result(
+            session, origin, source=ContentSource.ZIP,
+            skill_id="2000706", skill_version="1.0.1",
+        )
 
         assert copy.skill_id == "2000706"
         assert copy.skill_version == "1.0.1"
-        assert copy.score == source.score
-        assert copy.status == source.status
+        assert copy.score == origin.score
+        assert copy.status == origin.status
         assert [d.validator_name for d in copy.details] == ["schema"]
         # 报告按 content_hash 寻址，两行共用同一份文件，不复制。
-        assert copy.report_html_uri == source.report_html_uri
+        assert copy.report_html_uri == origin.report_html_uri
         # 评测确实是那时候跑的，改掉它等于谎报。
-        assert copy.evaluated_at == source.evaluated_at
+        assert copy.evaluated_at == origin.evaluated_at
 
 
 def test_clone_does_not_disturb_the_source(factory):
     with factory() as session:
-        source = _seed(session, skill_id="2000705", skill_version="1.0.0")
-        clone_result(session, source, skill_id="2000706", skill_version="1.0.1")
+        origin = _seed(session, skill_id="2000705", skill_version="1.0.0")
+        clone_result(
+            session, origin, source=ContentSource.ZIP,
+            skill_id="2000706", skill_version="1.0.1",
+        )
 
-        assert source.skill_id == "2000705"
-        assert source.skill_version == "1.0.0"
-        assert len(source.details) == 1
+        assert origin.skill_id == "2000705"
+        assert origin.skill_version == "1.0.0"
+        assert len(origin.details) == 1
 
 
 # ---- 一组耦合 skill 的上下文 ----
@@ -206,8 +214,9 @@ def test_clone_carries_the_context(factory):
     """克隆丢掉上下文的话，这条看起来就是"单独评出来的"，
     之后按上下文找复用会命中一条其实来自别的上下文的结论。"""
     with factory() as session:
-        source = _seed(session, skill_id="group/repo:skills/a", context_hash=BUNDLE)
+        origin = _seed(session, skill_id="group/repo:skills/a", context_hash=BUNDLE)
         cloned = clone_result(
-            session, source, skill_id="group/repo:skills/b", skill_version="v2"
+            session, origin, source=ContentSource.ZIP,
+            skill_id="group/repo:skills/b", skill_version="v2",
         )
         assert cloned.context_hash == BUNDLE

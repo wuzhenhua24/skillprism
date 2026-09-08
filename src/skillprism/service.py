@@ -12,7 +12,7 @@ from urllib.parse import quote, urlencode
 from sqlalchemy.orm import Session
 
 from skillprism import queue as task_queue
-from skillprism.domain import Tier
+from skillprism.domain import ContentSource, Tier
 from skillprism.materialize import MaterializeError, safe_relative_path
 from skillprism.models import EvaluationResult
 from skillprism.repository import find_result, latest_result, result_to_dto
@@ -35,14 +35,18 @@ def submit(
     session: Session,
     request: SubmitRequest,
     *,
-    version_selects_content: bool = False,
+    source: ContentSource,
 ) -> SubmitResponse:
     """受理一次触发，立刻返回。
 
-    ``version_selects_content`` 由内容来源决定（见
-    :attr:`Settings.version_selects_content`），只影响排队去重的键。
-    这里收一个布尔而不是直接读配置：提交路径要能在测试里两种语义都跑到，
-    不该依赖进程级的全局配置。
+    ``source`` 是本次触发的内容来源。它会随任务落库，因为它是身份的一部分
+    （见 :class:`~skillprism.domain.ContentSource`），也决定去重的键：
+    来源不同就是两个 ``skill_id`` 命名空间，不能互相折叠；来源还决定
+    ``skill_version`` 进不进键（:attr:`ContentSource.version_selects_content`）。
+
+    来源由调用方传进来而不是在这里读配置：提交路径要能在测试里两种语义都
+    跑到，也为将来两个入口各自声明来源留好位置——那时进程级的"当前来源"
+    这个概念就不存在了。
 
     刻意不在这里下载内容。这个调用挂在用户上传流程后面，同步下载意味着
     对方要承担我们的网络耗时（超时上限 60s、包上限 64MB）和可用性——
@@ -61,17 +65,18 @@ def submit(
         # 不声称是强保证。
         existing = task_queue.find_queued(
             session,
+            source,
             request.skill_id,
             request.tier,
             skill_version=request.skill_version,
-            match_version=version_selects_content,
+            match_version=source.version_selects_content,
         )
         if existing is not None:
             # 那条任务还没下载内容，跑起来取到的是最新的一份，所以身份
             # 信息要跟着更新到本次触发——否则结果会挂着旧版本号，
             # 描述的却是新内容。
             #
-            # version_selects_content 为真时版本已经在去重键里，这里的赋值
+            # source.version_selects_content 为真时版本已经在去重键里，这里的赋值
             # 是个恒等操作；留着是为了两条路径只有一份身份更新逻辑。
             existing.skill_name = request.skill_name
             existing.skill_version = request.skill_version
@@ -88,6 +93,7 @@ def submit(
 
     task = task_queue.enqueue(
         session,
+        source=source,
         skill_id=request.skill_id,
         skill_name=request.skill_name,
         skill_version=request.skill_version,
@@ -100,11 +106,15 @@ def submit(
 
 def lookup_result(
     session: Session,
+    source: ContentSource,
     skill_id: str,
     *,
     content_hash: str | None = None,
 ) -> EvaluationResult | None:
     """定位一条结论。给了 ``content_hash`` 就精确取，否则退回最近一条。
+
+    ``skill_id`` 只在一个来源内部唯一，所以查找必须带上 ``source``——
+    否则查询会跨到另一个接入的命名空间里去，取到一条同名但无关的结论。
 
     结论与结果页必须走**同一条**查找逻辑。两边各写一遍的后果是"结论查准了、
     点开报告却是另一份"——补 content_hash 之前的 ``/report`` 就是这样。
@@ -117,8 +127,8 @@ def lookup_result(
     （见 :func:`repository.save_result`），按它查会漏。
     """
     if content_hash:
-        return find_result(session, skill_id, content_hash)
-    return latest_result(session, skill_id)
+        return find_result(session, source, skill_id, content_hash)
+    return latest_result(session, source, skill_id)
 
 
 def report_url_for(row: EvaluationResult, public_base_url: str) -> str | None:
@@ -145,6 +155,7 @@ def report_url_for(row: EvaluationResult, public_base_url: str) -> str | None:
 
 def get_evaluation(
     session: Session,
+    source: ContentSource,
     skill_id: str,
     *,
     content_hash: str | None = None,
@@ -153,10 +164,10 @@ def get_evaluation(
     """取一条结论。``public_base_url`` 决定 ``report_url`` 拼不拼得出来。
 
     公开地址由调用方传进来而不是在这里读全局配置，和 :func:`submit` 收
-    ``version_selects_content`` 是同一个理由：查询路径要能在测试里两种配置
-    都跑到，不该依赖进程级的全局状态。
+    ``source`` 是同一个理由：查询路径要能在测试里两种配置都跑到，不该依赖
+    进程级的全局状态。
     """
-    row = lookup_result(session, skill_id, content_hash=content_hash)
+    row = lookup_result(session, source, skill_id, content_hash=content_hash)
     if row is None:
         return None
     return result_to_dto(row, report_url=report_url_for(row, public_base_url))

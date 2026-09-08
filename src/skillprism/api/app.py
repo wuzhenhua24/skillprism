@@ -12,7 +12,9 @@ from sqlalchemy.orm import Session
 
 from skillprism import service
 from skillprism.config import get_settings
+from skillprism.content import resolve_source_kind
 from skillprism.db import SCHEMA_NOT_READY_HINT, get_session_factory, schema_is_ready
+from skillprism.domain import ContentSource
 from skillprism.embedding_shim import router as embedding_shim_router
 from skillprism.materialize import MaterializeError, UnsafePathError
 from skillprism.models import EvaluationTask
@@ -24,6 +26,9 @@ async def lifespan(_: FastAPI):
     get_settings().ensure_dirs()
     if not schema_is_ready():
         raise RuntimeError(SCHEMA_NOT_READY_HINT)
+    # 两个内容来源都配了会在这里抛。放在启动而不是请求里：这种配置下每一条
+    # 结论都会挂在存疑的来源上，让进程起不来比让它带病服务要好。
+    resolve_source_kind(get_settings())
     yield
 
 
@@ -38,6 +43,16 @@ app = FastAPI(
 # Embedding 批量拆分 shim。Tier 2 的 worker 把 SKILL_EVAL_EMBEDDING_BASE_URL
 # 指向 <本服务>/embed/v1，而不是直连方舟。原因见 embedding_shim 模块文档。
 app.include_router(embedding_shim_router, prefix="/embed/v1", tags=["embedding-shim"])
+
+
+def current_source() -> ContentSource:
+    """本部署当前的内容来源。
+
+    暂时由配置唯一决定：一个进程只启用一种接入，所以提交与查询用的都是它。
+    等两个入口（zip / GitLab）分开之后，提交侧的来源由入口自己声明、查询侧
+    由 ``?source=`` 给出，这个函数就只剩"没指定时的缺省"这一个用途。
+    """
+    return resolve_source_kind(get_settings())
 
 
 def get_db() -> Session:
@@ -78,11 +93,7 @@ def submit_evaluation(
     if request.tier not in service.IMPLEMENTED_TIERS:
         raise HTTPException(status_code=501, detail=f"{request.tier} 尚未实现，当前仅支持 tier1")
     try:
-        return service.submit(
-            session,
-            request,
-            version_selects_content=get_settings().version_selects_content,
-        )
+        return service.submit(session, request, source=current_source())
     except (UnsafePathError, MaterializeError) as exc:
         # 只可能来自 skill_name 校验：这个字段是调用方直接给的，当场就能改。
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -95,6 +106,9 @@ def get_task(task_id: str, session: Session = Depends(get_db)) -> dict:
         raise HTTPException(status_code=404, detail="任务不存在")
     return {
         "task_id": task.id,
+        # 任务自己记着来源，不是现读配置：排队期间配置可能已经改了，
+        # 而这条任务属于它入队时的那个来源。
+        "source": task.source,
         "skill_id": task.skill_id,
         "skill_name": task.skill_name,
         "skill_version": task.skill_version,
@@ -158,6 +172,7 @@ def get_evaluation(
 ) -> EvaluationDTO:
     dto = service.get_evaluation(
         session,
+        current_source(),
         skill_id,
         content_hash=content_hash,
         public_base_url=get_settings().public_base_url,
@@ -183,7 +198,7 @@ def get_report(
     ``content_hash`` 与 ``/evaluation`` 同义，两边必须一起带：只在一边带，
     拿到的结论和报告可能来自不同版本。
     """
-    row = service.lookup_result(session, skill_id, content_hash=content_hash)
+    row = service.lookup_result(session, current_source(), skill_id, content_hash=content_hash)
     path = service.report_path(row.report_html_uri) if row else None
     if path is None:
         detail = "报告不存在" if row else _no_result_detail(content_hash)

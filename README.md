@@ -384,7 +384,8 @@ Git 服务端打的包形如 `<repo>-<ref>-<sha>/<子目录>/SKILL.md`，前缀�
 **`skill_version` 的语义在两种接入下不同**，去重键也因此不同。zip 接入下它
 是用户手填的标签、内容由 `skill_id` 决定，排队中换个版本号会折叠进同一条
 任务并刷新标签；GitLab 接入下它是 ref，两个 ref 是两份内容，折叠等于宣称评
-了 v1 却给出 v2 的结论，所以版本进去重键。开关是 `Settings.version_selects_content`，
+了 v1 却给出 v2 的结论，所以版本进去重键。开关是
+`ContentSource.version_selects_content`——它挂在**来源**上而不是配置上，
 由 `test_gitlab_mode_does_not_fold_across_refs` 钉住。
 
 **404 的坑。** GitLab 对"有令牌但无权限"的项目也返回 404 而不是 403（防项目
@@ -394,6 +395,31 @@ skill 不存在"。错误文案已经把两种可能都写上了，排查时先�
 
 令牌只需要 `read_repository`，不要给 `api`。**不要**把它放进
 `SKILLPRISM_SCANNER_ENV`——那是注给评测子进程的，公司凭据不进那一层。
+
+### 内容来源是身份的一部分
+
+`skill_id` 只在**一个来源内部**唯一。管理系统的资源 ID `42` 和 GitLab 的数字
+项目 ID `42` 是同一个字符串，两种接入并存时它们指向完全不同的东西。所以
+`evaluation_task` 与 `evaluation_result` 都带一列 `source`（`local` / `zip` /
+`gitlab`，见 `domain.ContentSource`），结果的唯一键是
+`(source, skill_id, content_hash)`。
+
+不带这一维会怎样：GitLab 上 `group/repo` 的结论把管理系统里同名的那条
+**删掉**（`save_result` 是先删后插），排队去重把两个来源的触发**折叠**成一条
+任务。两种都不会报错，也不会留下日志，只是结论悄悄换成了另一个 skill 的。
+
+**结论本身不分来源。** `find_reusable_result` 刻意不看 `source`，和它不看
+`skill_id` 是同一个理由：结论只取决于内容、评测器和策略。同一份字节从 zip
+传上来还是从 GitLab 取下来，评出来就该一样，重跑只是浪费。跨来源命中时会
+克隆一条挂到**本次触发**的来源下，否则它在自己的来源里查不到。
+
+**worker 按任务记的来源核对配置。** 内容来源在排队之后被改过时，那条任务
+会带着原因失败，而不是拿当前的客户端照跑——两边都可能"取得到东西"，照跑
+的结果是一份看起来正常的错结论。
+
+当前一个进程仍然只启用一种接入（两个都配会在启动时报错）。这一列是为
+"zip 与 GitLab 各走一个接口、同时在线"准备的：那时提交侧由入口声明来源，
+查询侧由 `?source=` 给出。
 
 ### 结果怎么回去
 

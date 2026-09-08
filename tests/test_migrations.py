@@ -15,9 +15,10 @@ from alembic import command
 from alembic.autogenerate import compare_metadata
 from alembic.config import Config
 from alembic.migration import MigrationContext
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 
 from skillprism.config import reset_settings
+from skillprism.domain import ContentSource
 from skillprism.models import Base
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -83,3 +84,43 @@ def test_downgrade_to_base_is_reachable(db_url, monkeypatch):
 
     # 只剩 alembic 自己的版本表
     assert names <= {"alembic_version"}, f"回滚后仍有残留表：{names - {'alembic_version'}}"
+
+
+#: 加 source 列的那次迁移之前的版本。
+BEFORE_SOURCE = "37e6774f05d5"
+
+_SEED = text(
+    "INSERT INTO evaluation_result "
+    "(id, skill_id, content_hash, status, severity_counts, incomplete_scans, "
+    " evaluated_at, created_at) "
+    "VALUES ('r1', 'group/repo', 'sha256:x', 'passed', '{}', '[]', "
+    " '2026-09-01 00:00:00', '2026-09-01 00:00:00')"
+)
+
+
+def test_existing_rows_get_the_backfill_source(db_url, monkeypatch):
+    """存量行必须都拿到一个来源——``source`` 是 NOT NULL，漏掉一行就升不上去。
+
+    填成哪个来源是测试阶段的一次性选择（见迁移里的 BACKFILL_SOURCE），
+    这里只钉住"填上了"。
+    """
+    monkeypatch.setenv("SKILLPRISM_DATABASE_URL", db_url)
+    reset_settings()
+
+    cfg = _alembic_config()
+    engine = create_engine(db_url)
+    try:
+        command.upgrade(cfg, BEFORE_SOURCE)
+        with engine.begin() as conn:
+            conn.execute(_SEED)
+
+        command.upgrade(cfg, "head")
+
+        with engine.connect() as conn:
+            sources = conn.execute(text("SELECT source FROM evaluation_result")).scalars().all()
+    finally:
+        engine.dispose()
+        reset_settings()
+
+    # 填成哪个来源是迁移里的一次性选择，这里不复述它，只要求是个合法取值。
+    assert sources and all(s in set(ContentSource) for s in sources)

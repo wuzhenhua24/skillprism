@@ -22,9 +22,10 @@ from skillprism.content import (
     SkillContentSource,
     SkillNotFoundError,
     build_content_source,
+    resolve_source_kind,
 )
 from skillprism.db import SCHEMA_NOT_READY_HINT, schema_is_ready, session_scope
-from skillprism.domain import EvaluationStatus
+from skillprism.domain import ContentSource, EvaluationStatus
 from skillprism.materialize import (
     MaterializeError,
     SkillFile,
@@ -53,11 +54,26 @@ def process_task(
     task: EvaluationTask,
     *,
     settings: Settings,
-    source: SkillContentSource,
+    content_source: SkillContentSource,
     storage: ReportStorage,
     evaluator_version: str | None = None,
 ) -> EvaluationStatus:
     """处理一个任务。返回最终对外状态。"""
+    source = resolve_source_kind(settings)
+    if task.source != str(source):
+        # 这条任务是在另一种接入下排的。本 worker 手上只有一个内容来源客户端，
+        # 照跑就是去错的地方取内容——而两边的 skill_id 都可能"取得到"，
+        # 于是评出一份看起来正常的错结论。宁可让它带着原因失败。
+        task_queue.finish(
+            session,
+            task,
+            error=(
+                f"任务来源是 {task.source}，本 worker 配置的来源是 {source}："
+                "内容来源在排队之后被改过，这条任务作废，请按原来源重新触发"
+            ),
+        )
+        return EvaluationStatus.ERROR
+
     work_dir = settings.work_root / task.id
     skill_dir = work_dir / "skill"
     out_dir = work_dir / "reports"
@@ -69,6 +85,7 @@ def process_task(
                 task,
                 settings=settings,
                 source=source,
+                content_source=content_source,
                 storage=storage,
                 evaluator_version=evaluator_version,
                 work_dir=work_dir,
@@ -77,7 +94,7 @@ def process_task(
             cleanup(work_dir)
 
     try:
-        files = source.fetch(task.skill_id, task.skill_version)
+        files = content_source.fetch(task.skill_id, task.skill_version)
     except SkillNotFoundError as exc:
         # 内容不存在或归档解不出，再试多少次都一样。
         task_queue.finish(session, task, error=f"取不到内容：{exc}")
@@ -113,6 +130,7 @@ def process_task(
                 clone_result(
                     session,
                     reusable,
+                    source=source,
                     skill_id=task.skill_id,
                     skill_version=task.skill_version,
                 )
@@ -164,6 +182,7 @@ def process_task(
         save_result(
             session,
             dto,
+            source=source,
             report_json_uri=json_uri,
             report_html_uri=html_uri,
             policy_file_hash=policy_hash,
@@ -189,7 +208,8 @@ def _process_bundle(
     task: EvaluationTask,
     *,
     settings: Settings,
-    source: SkillContentSource,
+    source: ContentSource,
+    content_source: SkillContentSource,
     storage: ReportStorage,
     evaluator_version: str | None,
     work_dir,
@@ -207,7 +227,7 @@ def _process_bundle(
     out_dir = work_dir / "reports"
 
     try:
-        bundle = source.fetch_bundle(task.skill_id, task.skill_version)
+        bundle = content_source.fetch_bundle(task.skill_id, task.skill_version)
     except SkillNotFoundError as exc:
         task_queue.finish(session, task, error=f"取不到内容：{exc}")
         return EvaluationStatus.ERROR
@@ -249,8 +269,14 @@ def _process_bundle(
     if len(reusable) == len(bundle.members) and bundle.members:
         for member, row in reusable.items():
             member_id = _member_skill_id(task.skill_id, member)
-            if row.skill_id != member_id:
-                clone_result(session, row, skill_id=member_id, skill_version=task.skill_version)
+            if row.skill_id != member_id or row.source != str(source):
+                clone_result(
+                    session,
+                    row,
+                    source=source,
+                    skill_id=member_id,
+                    skill_version=task.skill_version,
+                )
         task_queue.finish(session, task)
         return _worst_status(EvaluationStatus(row.status) for row in reusable.values())
 
@@ -312,6 +338,7 @@ def _process_bundle(
         save_result(
             session,
             dto,
+            source=source,
             report_json_uri=json_uri,
             report_html_uri=html_uri,
             policy_file_hash=policy_hash,
@@ -372,7 +399,7 @@ def _requeue(session, task: EvaluationTask, settings: Settings, error: str) -> N
 def run_once(
     *,
     settings: Settings,
-    source: SkillContentSource,
+    content_source: SkillContentSource,
     storage: ReportStorage,
     evaluator_version: str | None = None,
     queue: str = "fast",
@@ -389,7 +416,7 @@ def run_once(
                 session,
                 task,
                 settings=settings,
-                source=source,
+                content_source=content_source,
                 storage=storage,
                 evaluator_version=evaluator_version,
             )
@@ -439,7 +466,7 @@ def main() -> int:
         logger.error(SCHEMA_NOT_READY_HINT)
         return 1
 
-    source = build_content_source(settings)
+    content_source = build_content_source(settings)
     storage = LocalReportStorage(settings.report_root)
 
     logger.info("worker 已启动，轮询队列 fast")
@@ -447,7 +474,7 @@ def main() -> int:
         try:
             worked = run_once(
                 settings=settings,
-                source=source,
+                content_source=content_source,
                 storage=storage,
                 evaluator_version=report.version,
             )

@@ -8,6 +8,8 @@
   固定列——上游新增一个 validator 就要改表结构。
 - task 上记 skill_name/skill_version：内容由 worker 下载，触发方在提交时
   声明的身份信息必须先落库，worker 才拿得到。
+- task 与 result 都带 source：内容来源是身份的一部分而不是部署配置，
+  两种接入对 skill_id 的解释不同，见 domain.ContentSource。
 """
 
 from __future__ import annotations
@@ -30,6 +32,9 @@ class EvaluationTask(Base):
     __tablename__ = "evaluation_task"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    #: 内容从哪来（ContentSource）。必须随任务落库，不能在 worker 里现读配置：
+    #: 排队期间配置可能已经变了，那时用当前配置去取内容就是取错地方。
+    source: Mapped[str] = mapped_column(String(16), index=True)
     skill_id: Mapped[str] = mapped_column(String(255), index=True)
     #: 管理系统里登记的 skill 名。物化目录用它命名，SkillEvaluator 的
     #: SCHEMA.name_consistency 会拿它和 frontmatter 的 name 比对。
@@ -67,9 +72,16 @@ class EvaluationTask(Base):
 
 class EvaluationResult(Base):
     __tablename__ = "evaluation_result"
-    __table_args__ = (UniqueConstraint("skill_id", "content_hash", name="uq_skill_content"),)
+    #: 唯一键带 source：``skill_id`` 只在一个来源内部唯一。管理系统的资源 ID
+    #: ``42`` 和 GitLab 的数字项目 ID ``42`` 是同一个字符串，不带来源就会
+    #: 互相覆盖——覆盖没有任何症状，只是结论悄悄换了个 skill。
+    __table_args__ = (
+        UniqueConstraint("source", "skill_id", "content_hash", name="uq_skill_content"),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    #: 这条结论描述的内容是从哪个来源取的，见 ContentSource。
+    source: Mapped[str] = mapped_column(String(16), index=True)
     skill_id: Mapped[str] = mapped_column(String(255), index=True)
     #: 与 content_hash 唯一，天然实现“内容未变不重跑”。
     content_hash: Mapped[str] = mapped_column(String(80), index=True)
