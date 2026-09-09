@@ -323,7 +323,6 @@ def test_directory_is_named_by_registered_name_not_skill_id(env):
     # 一致"，所以线上它永远不会报——它已经不是质量信号，而是一枚契约探针：
     # 报了就说明对方那道校验被绕过或被放宽。探针本身必须是活的，
     # 否则上面那句"没有误报"什么也不说明。
-    # 内容没变，不 force 就会复用结论、根本不会重跑评测器。
     mismatched = _evaluate(
         env, skill_id=resource_id, skill_name="not-the-registered-name", force=True
     )
@@ -391,3 +390,39 @@ def test_preflight_reports_scanner_state():
         pytest.skip("skillevaluator 不在 PATH 上")
     assert report.binary is not None
     assert set(report.missing_scanners) <= set(REQUIRED_SCANNERS)
+
+
+@needs_cli
+@needs_scanners
+def test_a_different_registered_name_is_not_the_same_content(env):
+    """同样的字节、不同的登记名，不能复用——**不带 force 也不能**。
+
+    登记名就是物化目录名，而 SCHEMA.name_consistency 拿它和 frontmatter 的
+    name 比对，铺错名字就多一条 HIGH。所以"同样的字节"并不等于"同一个结论"，
+    哈希必须带上目录名（见 materialize.compute_content_hash）。
+
+    不带的后果是这枚契约探针被复用悄悄关掉：只要这份内容曾经用一个对的名字
+    评过，之后换任何名字重传都会命中那条干净结论，管理系统的上传校验哪天
+    被绕过，我们不会知道。方向也是最坏的那个——把脏的说成干净的，没人会来问。
+    """
+    # 同一个包传了两次，各拿到一个资源 ID——管理系统那边最常见的形态。
+    for resource_id in ("2000705", "2000706"):
+        shutil.copytree(
+            env.local_skills_root / SKILL_ID, env.local_skills_root / resource_id
+        )
+
+    matched = _evaluate(env, skill_id="2000705", skill_name=SKILL_ID)
+    assert "name_consistency" not in _check_names(matched)
+
+    # 同样的字节，换个登记名，**不 force**。
+    renamed = _evaluate(env, skill_id="2000706", skill_name="not-the-registered-name")
+
+    assert renamed is not None, "任务没能产出结论"
+    assert renamed.content_hash != matched.content_hash, (
+        "两个登记名算出了同一个 content_hash——目录名没进哈希，复用会把它们混为一谈"
+    )
+    assert "name_consistency" in _check_names(renamed), (
+        "复用了另一个登记名下的结论，那条 HIGH 就此消失——契约探针失效"
+    )
+    # 不断言分数不同：评分不是逐条线性扣分，这份 fixture 下多这一条 HIGH
+    # 总分仍是 80.2。问题清单变了才是这条测试要钉的东西。

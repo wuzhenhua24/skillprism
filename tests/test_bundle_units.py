@@ -323,7 +323,7 @@ def test_the_task_hash_is_the_context_the_members_carry(worker_env):
         ],
         members=["code-review", "test-gen"],
     )
-    context = compute_content_hash(bundle.files)
+    context = compute_content_hash(bundle.files, name=None)
     policy = policy_file_hash(worker_env)
     assert policy, "策略指纹为空的话不会复用，这条用例就走不到全命中那条路"
 
@@ -334,7 +334,9 @@ def test_the_task_hash_is_the_context_the_members_carry(worker_env):
                     id=str(uuid.uuid4()),
                     source=str(ContentSource.LOCAL),
                     skill_id=member_skill_id(BUNDLE_ID, member),
-                    content_hash=compute_content_hash(_member_files(bundle, member)),
+                    content_hash=compute_content_hash(
+                        _member_files(bundle, member), name=member
+                    ),
                     context_hash=context,
                     status="passed",
                     severity_counts={},

@@ -115,16 +115,52 @@ def test_materialize_rejects_nonempty_dest(tmp_path):
 def test_content_hash_is_order_independent():
     a = [MANIFEST, SkillFile(path="b.md", data=b"B")]
     b = [SkillFile(path="b.md", data=b"B"), MANIFEST]
-    assert compute_content_hash(a) == compute_content_hash(b)
+    assert compute_content_hash(a, name="demo") == compute_content_hash(b, name="demo")
 
 
 def test_content_hash_changes_with_content():
-    base = compute_content_hash([MANIFEST])
-    changed = compute_content_hash([SkillFile(path="SKILL.md", data=b"different")])
+    base = compute_content_hash([MANIFEST], name="demo")
+    changed = compute_content_hash(
+        [SkillFile(path="SKILL.md", data=b"different")], name="demo"
+    )
     assert base != changed
 
 
 def test_content_hash_changes_with_path():
-    a = compute_content_hash([MANIFEST, SkillFile(path="x.md", data=b"same")])
-    b = compute_content_hash([MANIFEST, SkillFile(path="y.md", data=b"same")])
+    a = compute_content_hash([MANIFEST, SkillFile(path="x.md", data=b"same")], name="demo")
+    b = compute_content_hash([MANIFEST, SkillFile(path="y.md", data=b"same")], name="demo")
     assert a != b
+
+
+def test_content_hash_changes_with_the_directory_name():
+    """同样的字节铺成不同的目录名，是两份内容——因为它们是两个结论。
+
+    ``SCHEMA.name_consistency`` 拿目录名和 frontmatter 的 name 比对：实测同一份
+    SKILL.md（``name: alpha``）铺进 alpha/ 是 82.0/B，铺进 beta/ 是 79.5/C 并多
+    一条 HIGH。哈希不带目录名的话，这两个结论会互相复用——一组里两个同内容
+    成员互相顶替，或者换个登记名重传就把那条 HIGH 复用没了。
+    """
+    files = [MANIFEST]
+    assert compute_content_hash(files, name="alpha") != compute_content_hash(
+        files, name="beta"
+    )
+    # 名字相同就仍然是同一份内容：换个资源 ID 重传照样命中缓存，
+    # 那正是复用当初要解决的场景。
+    assert compute_content_hash(files, name="alpha") == compute_content_hash(
+        files, name="alpha"
+    )
+
+
+def test_content_hash_without_a_name_is_a_different_key():
+    """``name=None``（整组指纹）和某个具体名字不能撞上。
+
+    组指纹与成员哈希都存在 evaluation_result 的同一批列里被比较，
+    两者混淆会让"整组"被当成"某个成员"。
+    """
+    files = [MANIFEST]
+    assert compute_content_hash(files, name=None) != compute_content_hash(
+        files, name=""
+    )
+    assert compute_content_hash(files, name=None) != compute_content_hash(
+        files, name="demo"
+    )

@@ -118,8 +118,16 @@ def process_task(
         _requeue(session, task, settings, f"取不到内容：{exc}")
         return EvaluationStatus.ERROR
 
+    # 目录名用管理系统里登记的 skill 名：SkillEvaluator 的
+    # SCHEMA.name_consistency 会拿它和 frontmatter 的 name 比对。用固定名或
+    # skill_id（可能是纯数字的资源 ID）都会让每个 skill 都平白多一条 HIGH。
+    # 回落到 skill_id 末段只为兼容 skill_name 落库之前排下的存量任务。
+    #
+    # 必须在算 hash 之前定下来：它是寻址键的一部分（见 compute_content_hash）。
+    skill_name = task.skill_name or task.skill_id.rstrip("/").split("/")[-1]
+
     # 内容可能在入队之后发生变化，以实际取到的内容为准。
-    content_hash = compute_content_hash(files)
+    content_hash = compute_content_hash(files, name=skill_name)
     task.content_hash = content_hash
 
     policy_hash = policy_file_hash(settings)
@@ -153,12 +161,6 @@ def process_task(
                 )
             task_queue.finish(session, task)
             return EvaluationStatus(reusable.status)
-
-    # 目录名用管理系统里登记的 skill 名：SkillEvaluator 的
-    # SCHEMA.name_consistency 会拿它和 frontmatter 的 name 比对。用固定名或
-    # skill_id（可能是纯数字的资源 ID）都会让每个 skill 都平白多一条 HIGH。
-    # 回落到 skill_id 末段只为兼容 skill_name 落库之前排下的存量任务。
-    skill_name = task.skill_name or task.skill_id.rstrip("/").split("/")[-1]
 
     try:
         skill_root = materialize(files, skill_dir, name=skill_name)
@@ -244,7 +246,9 @@ def _process_bundle(
 
     # 整套的指纹。它同时是任务的 content_hash（任务评的就是这一整套）和每个
     # 成员结论的 context_hash（成员的结论取决于它所在的这一套）。
-    context_hash = compute_content_hash(bundle.files)
+    # name=None：catalog 根固定叫 skills/、不与任何 frontmatter 比对，而成员名
+    # 本来就在各自的路径里（alpha/SKILL.md），已经进了摘要。
+    context_hash = compute_content_hash(bundle.files, name=None)
     task.content_hash = context_hash
     policy_hash = policy_file_hash(settings)
 
@@ -255,7 +259,11 @@ def _process_bundle(
         head, sep, rest = item.path.partition("/")
         if sep and head in member_files:
             member_files[head].append(SkillFile(path=rest, data=item.data))
-    member_hashes = {m: compute_content_hash(files) for m, files in member_files.items()}
+    # 成员目录名进各自的 hash：两个成员字节相同、目录名不同时，结论本来就不同
+    # （name_consistency 拿目录名和 frontmatter 比），不带的话它们会互相顶替。
+    member_hashes = {
+        m: compute_content_hash(files, name=m) for m, files in member_files.items()
+    }
 
     # 逐个成员查缓存。全中就不用跑评测器——一套里只改了一个 skill 是常态，
     # 其余成员的 context_hash 也变了（整套指纹变了），所以这里通常不会全中；

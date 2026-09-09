@@ -137,13 +137,41 @@ def safe_relative_path(raw: str) -> PurePosixPath:
     return PurePosixPath(*parts)
 
 
-def compute_content_hash(files: Iterable[SkillFile]) -> str:
+#: 目录名那一层摘要的域分隔符。带版本号是为了将来再往键里加东西时，
+#: 老值不会和新值撞上。
+_NAME_DOMAIN = b"skillprism/content-hash/v2\x00"
+
+
+def compute_content_hash(files: Iterable[SkillFile], *, name: str | None) -> str:
     """计算与文件顺序无关的规范化内容哈希。
 
     内容不在 Git 里，没有天然的 commit 标识，因此这个哈希承担两个职责：
     判断“内容是否变过”（缓存命中）与关联结果版本。
 
-    做法：对每个文件取 (规范化路径, 内容摘要)，按路径排序后再整体摘要。
+    做法：对每个文件取 (规范化路径, 内容摘要)，按路径排序后再整体摘要，
+    最后把 ``name`` 罩在外面。
+
+    **``name`` 是物化后最外层那个目录的名字，它必须进来。** 这个哈希是结论
+    的寻址键，而结论并不只取决于文件字节：目录名会参与判定——SkillEvaluator
+    的 ``SCHEMA.name_consistency`` 拿它和 frontmatter 的 ``name`` 比对，不一致
+    报一条 HIGH，还会连带影响 discoverability 与总分。实测同一份 SKILL.md
+    （frontmatter ``name: alpha``）铺进 ``alpha/`` 是 82.0/B，铺进 ``beta/``
+    是 79.5/C。
+
+    不带它的后果是"同样的字节就是同一个结论"这个前提不成立，而复用正是按
+    这个前提做的：一组里两个内容相同的成员会互相顶替（重新触发一次，分数
+    就变了）；同一个包换个资源 ID、登记名填得不一样，会复用前一个的干净
+    结论，那条 HIGH 就此消失——而它本是一枚契约探针，管理系统的上传校验
+    被绕过时全靠它报警。报告也按这个哈希寻址，撞上就是两个 skill 共用一份
+    报告、后写的覆盖先写的。
+
+    传什么名字：**实际会铺到磁盘上的那个**。单个 skill 是登记名
+    （``materialize`` 的 ``name=``），一组里的成员是仓库里的目录名。
+
+    ``name=None`` 表示这份内容不以某个名字被铺开评——只有一组 skill 的整组
+    指纹是这种情况：它的根目录名固定是 ``skills/``、不与任何 frontmatter 比
+    对，而成员名本来就在各自的路径里（``alpha/SKILL.md``），已经进了摘要。
+    必须显式传，不给默认值：漏传不会报错，只会让缓存悄悄退回旧语义。
     """
     digests: list[tuple[str, str]] = []
     for item in files:
@@ -159,7 +187,19 @@ def compute_content_hash(files: Iterable[SkillFile]) -> str:
         outer.update(b"\x00")
         outer.update(digest.encode("ascii"))
         outer.update(b"\n")
-    return f"sha256:{outer.hexdigest()}"
+    inner = outer.hexdigest()
+
+    if name is None:
+        return f"sha256:{inner}"
+
+    # 分两层而不是把名字混进同一遍摘要：名字和路径都是任意字符串，同一遍里
+    # 拼接会有歧义（一个叫 name 的文件能构造出和某个名字一样的字节序列）。
+    named = hashlib.sha256()
+    named.update(_NAME_DOMAIN)
+    named.update(name.encode("utf-8"))
+    named.update(b"\x00")
+    named.update(inner.encode("ascii"))
+    return f"sha256:{named.hexdigest()}"
 
 
 def _validate_budget(

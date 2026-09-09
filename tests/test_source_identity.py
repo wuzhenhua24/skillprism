@@ -275,7 +275,7 @@ def test_a_cross_source_cache_hit_still_lands_a_verdict_in_this_source(env):
     的 results 也是空的。症状和 bundle 那个坑一模一样，成因不同。
     """
     files = [SkillFile(path="SKILL.md", data=b"---\nname: demo\n---\n")]
-    content_hash = compute_content_hash(files)
+    content_hash = compute_content_hash(files, name="demo")
     policy = policy_file_hash(env)
     assert policy, "策略指纹为空的话复用根本不会发生，这条用例就没测到东西"
 
@@ -312,7 +312,7 @@ def test_a_cross_source_cache_hit_when_this_source_already_has_one(env):
     是一次最普通的缓存命中。
     """
     files = [SkillFile(path="SKILL.md", data=b"---\nname: demo\n---\n")]
-    content_hash = compute_content_hash(files)
+    content_hash = compute_content_hash(files, name="demo")
     policy = policy_file_hash(env)
 
     with session_scope() as db:

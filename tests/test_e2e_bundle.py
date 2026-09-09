@@ -26,7 +26,7 @@ from skillprism.domain import EvaluationStatus
 from skillprism.models import EvaluationTask
 from skillprism.schemas import SubmitRequest
 from skillprism.domain import ContentSource
-from skillprism.service import get_evaluation, submit, task_to_dto
+from skillprism.service import get_evaluation, lookup_result, submit, task_to_dto
 from skillprism.storage import LocalReportStorage
 from skillprism.worker import run_once
 
@@ -250,3 +250,88 @@ def test_the_task_hands_back_keys_that_actually_resolve(env):
             )
             assert got is not None, f"任务交回的键查不到结论：{ref.skill_id}"
             assert got.context_hash == dto.context_hash
+
+
+#: 两个成员用**逐字节相同**的 SKILL.md，frontmatter 的 name 都写 alpha。
+#: 于是 alpha/ 的目录名与它一致、beta/ 的不一致——同样的字节，两个结论。
+TWIN_MD = """---
+name: alpha
+description: A duplicated skill used to check that two byte-identical members keep their own verdicts. Use when auditing the reuse key.
+metadata:
+  author: SkillPrism E2E <e2e@example.com>
+---
+
+# Alpha
+
+Prose only. No executable content.
+"""
+
+TWINS_ID = "twins"
+
+
+def _checks(dto) -> set[str]:
+    return {f.check_name for v in dto.tiers.tier1.validators for f in v.findings}
+
+
+@needs_cli
+@needs_scanners
+def test_two_identical_members_keep_their_own_verdicts(env):
+    """一组里两个成员字节相同、目录名不同，结论必须各归各的。
+
+    目录名参与判定（SCHEMA.name_consistency 拿它和 frontmatter 的 name 比），
+    所以这两个成员的结论本来就不一样。哈希不带目录名的话它们会算出同一个
+    content_hash，后果有三个，这条用例把三个一起钉住：
+
+    1. 复用按 (content_hash, context_hash) 找，两个成员会命中同一行，于是
+       **重新触发一次同样的内容，其中一个的分数就变了**——正是整个复用设计
+       最想避免的那个症状。
+    2. 报告按 (content_hash, context_hash) 寻址，两个成员会共用一个文件，
+       后跑的覆盖先跑的。这一条第一次评测当场就发生，不需要复用参与。
+    3. clone 往已经有行的身份上插，撞唯一键把任务搞崩。
+    """
+    root = env.local_skills_root / TWINS_ID
+    for member in ("alpha", "beta"):
+        (root / member).mkdir(parents=True)
+        (root / member / "SKILL.md").write_text(TWIN_MD, encoding="utf-8")
+
+    _run(env, SubmitRequest(skill_id=TWINS_ID, skill_name=TWINS_ID, bundle=True))
+
+    with session_scope() as db:
+        alpha = get_evaluation(db, ContentSource.LOCAL, f"{TWINS_ID}/alpha")
+        beta = get_evaluation(db, ContentSource.LOCAL, f"{TWINS_ID}/beta")
+        reports = {
+            m: lookup_result(db, ContentSource.LOCAL, f"{TWINS_ID}/{m}").report_html_uri
+            for m in ("alpha", "beta")
+        }
+
+    assert alpha is not None and beta is not None
+    assert alpha.content_hash != beta.content_hash, (
+        "字节相同的两个成员算出了同一个 content_hash——目录名没进哈希"
+    )
+    # 上下文是整组的，两个成员共享，这是对的。
+    assert alpha.context_hash == beta.context_hash
+
+    assert "name_consistency" not in _checks(alpha)
+    assert "name_consistency" in _checks(beta), (
+        "beta/ 的目录名与 frontmatter 的 alpha 不符，这条该报"
+    )
+
+    assert reports["alpha"] != reports["beta"], (
+        "两个成员共用了一份报告文件，后跑的覆盖了先跑的"
+    )
+
+    # 再触发一次同样的内容：走全命中缓存那条路，结论必须原封不动。
+    _run(env, SubmitRequest(skill_id=TWINS_ID, skill_name=TWINS_ID, bundle=True))
+
+    with session_scope() as db:
+        alpha_again = get_evaluation(db, ContentSource.LOCAL, f"{TWINS_ID}/alpha")
+        beta_again = get_evaluation(db, ContentSource.LOCAL, f"{TWINS_ID}/beta")
+
+    for before, after, member in (
+        (alpha, alpha_again, "alpha"),
+        (beta, beta_again, "beta"),
+    ):
+        assert after.score == before.score, f"{member} 的分数被另一个成员的结论顶掉了"
+        assert _checks(after) == _checks(before), f"{member} 的问题清单变了"
+        # 命中缓存就不会重跑评测器，评测时间因此不变。
+        assert after.evaluated_at == before.evaluated_at, f"{member} 被重新评了一遍"
