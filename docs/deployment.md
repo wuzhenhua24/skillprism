@@ -113,7 +113,13 @@ sudo -u skillprism $UV tool install \
 ```
 
 > **SkillSpector 必须 pin 在 v2.9.6。** 装 latest 会让安全扫描静默降级为
-> incomplete。原因见 [README](../README.md)
+> incomplete：2.10 起，一条非致命的 `reference_unresolved`（标题里有斜杠就够）
+> 就把覆盖标成 `partial`，SkillEvaluator 随即把整个 skillspector 扫描记为
+> incomplete。上游 [#112](https://github.com/NVIDIA/SkillEvaluator/pull/112)
+> 已合并（`ff349e0`），修的是更早那版"报告不可信整份丢弃"的判法——**它不解除
+> 这个 pin**，2.10.0 / 2.11.1 实测仍是 incomplete。skillevaluator 从 main 装，
+> 已经包含 #112，与 v2.9.6 搭配实测正常。
+> 详见 [README](../README.md)
 > 与 [docs/upstream/pr112-comment.md](upstream/pr112-comment.md)。
 
 gitleaks 只发布二进制，按架构选：
@@ -557,7 +563,7 @@ worker 写的报告，所以两者必须同机。要真正横向扩展需要先�
 | 现象 | 原因 | 处理 |
 | --- | --- | --- |
 | worker 启动即退出，日志写"启动自检未通过" | 扫描器缺失或 PATH 不对 | 检查 unit 里的 `Environment=PATH`，确认四个工具都能找到 |
-| `status` 一直是 `incomplete`，`incomplete_scans` 含 `skillspector` | 装了 2.10.0 及以上版本 | 降回 v2.9.6 |
+| `status` 一直是 `incomplete`，`incomplete_scans` 含 `skillspector` | 装了 2.10.0 及以上版本：覆盖被标 `partial`，扫描就不算跑全 | 降回 v2.9.6。升 skillevaluator 不解决——上游 #112 已合并，2.10+ 仍是 incomplete |
 | 所有 skill 都报 `SCHEMA.author_missing` | `internal.yaml` 的邮箱域名还是 `example.com` | 改成公司域名 |
 | 出现 `name_consistency` | 管理系统的上传校验失效了 | 它在上传口就卡住"包名与文件内技能名一致"，所以这条**正常情况下不可能报**。报了就是那道校验被绕过、被放宽，或两边的归一化规则不同（大小写、空格、Unicode），先查上传侧 |
 | 每个 skill 都多出 `folder_hierarchy` | 物化布局异常 | 物化时没套上 `skills/` 那层，见 materialize.py |

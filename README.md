@@ -37,22 +37,43 @@ brew install gitleaks
 SkillSpector 2.10.0 起对覆盖不完整的扫描 *fail closed*：当
 `analysis_completeness.is_complete` 为 false 时，把 `recommendation` 从
 `SAFE` 升级为 `CAUTION`，同时保留诚实的 score 与 severity
-（见其 `nodes/report.py` 的升级分支）。
+（见其 `nodes/report.py` 的升级分支）。这类报告以前会被 SkillEvaluator 当成
+"不可信"整份丢弃——上游 [#112](https://github.com/NVIDIA/SkillEvaluator/pull/112)
+已经修掉了这一条（`ff349e0`，2026-09-08 合入 main，未打 tag），**但 pin 还是
+不能松**。
 
-而 SkillEvaluator 0.2.1 严格校验 `recommendation` 必须等于 severity 的映射值
-（`LOW→SAFE` / `MEDIUM→CAUTION` / `HIGH|CRITICAL→DO_NOT_INSTALL`，见
-`validators/security.py:55`）。被升级过的报告对不上映射，SkillEvaluator 判定
-报告不可信，把**整个**安全扫描标为 incomplete——注意不是丢弃某一条结论，
-而是整个扫描的结果都不算数。
+#112 改的是"怎么解释这份报告"：SkillEvaluator 现在按版本分契约（2.9.5/2.9.6 是
+无 `status` 的旧 schema，2.10+ 带 `status`，2.11+ 要 `bundled_execution_surface`），
+`recommendation` 校验也认了"incomplete 且 LOW 时期望 CAUTION"。partial 报告里的
+findings 从此会被保留，但**扫描本身仍然记为 incomplete**。到我们这边，
+`incomplete_scans` 非空就是 INCOMPLETE、结果也不进复用（见 `adapter.py` 与
+结果复用一节），所以文档型 skill 的实际结果没有变好。
+
+实测矩阵，fixture 用 `tests/test_e2e_tier1.py` 里那份 skill：
+
+| SkillEvaluator | SkillSpector | Security Scan | `incomplete_scans` |
+| --- | --- | --- | --- |
+| 0.2.1（#112 之前） | 2.9.6 | passed | `[]` |
+| `ff349e0`（#112 之后） | 2.9.6 | passed | `[]` |
+| `ff349e0` | 2.10.0 | incomplete | `["skillspector"]` |
+| `ff349e0` | 2.11.1 | incomplete | `["skillspector"]` |
 
 **触发面比想象中大。** SkillSpector 的引用解析会把路径样式的文本当作本地引用，
 解析不了就记一条 `reference_unresolved`、把覆盖标为 partial。一个
 `### Input/Output Separation` 这样带斜杠的标题就足够触发。文档型 skill
-里这类写法非常常见，所以这不是边缘情况。
+里这类写法非常常见，所以这不是边缘情况。2.11.1 仍然如此，且 `scan --help` 里
+没有关掉引用解析的开关——`--baseline` 压的是 findings 不是 completeness，
+何况 skillspector 由 skillevaluator 自己拉起，我们塞不进参数。
 
-升级 SkillEvaluator 前不要动这个 pin。`tests/test_e2e_tier1.py` 里的
-`test_security_scan_completes` 会在版本回归时立刻变红（已实测：
-2.11.0 下该用例失败，2.9.6 下通过）。
+**升级 SkillEvaluator 是安全的**（上表第二行已实测）。v2.9.6 现在是上游显式
+支持的契约，2.9.5/2.9.6 共用 statusless 分支并有 captured fixture
+`skillspector-2.9.6-no-llm.json`，不是碰巧能用。
+
+**解 pin 的前提**变成了二选一：SkillSpector 不再因非致命的
+`reference_unresolved` 判 partial；或者我们自己接受 coherent partial——后者要
+动 `adapter.py` 的判据，和"`incomplete_scans` 为空才复用"直接冲突，得单独决定。
+在那之前 `tests/test_e2e_tier1.py` 里的 `test_security_scan_completes` 继续当
+哨兵——它断言的正是上表那一列（`incomplete_scans == []`）。
 
 装齐后启动：
 

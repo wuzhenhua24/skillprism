@@ -1,15 +1,30 @@
 # 上游 PR #112：SkillSpector 完整性契约不匹配
 
 **这是什么：** 给 [NVIDIA/SkillEvaluator#112](https://github.com/NVIDIA/SkillEvaluator/pull/112)
-准备的独立复现确认评论。该 PR 修的正是我们踩到的问题。
+准备过的独立复现确认评论。下半部分是当时写好的原文，保留下来当证据。
 
-**为什么留着：** 它记录了我们把 SkillSpector pin 在 v2.9.6 的原因和证据。
-PR 合并后可以升级 SkillEvaluator、解除 pin——届时用
-`tests/test_e2e_tier1.py::test_security_scan_completes` 验证：
-把 SkillSpector 装回 latest 跑一遍，绿了就说明 pin 可以去掉。
+**状态（2026-09-09）：** PR #112 已合并——`ff349e0`，2026-09-08 进 main，上游
+尚未打 tag（最新 tag 仍是 `v0.1.0`，版本号仍写 0.2.1）。评论最终没有发出，
+现在也不必发了。
 
-**状态：** 截至 2026-09-01，PR #112 仍为 open，上游 main 停在 `3bfba44`，未合入。
-本评论尚未发出。
+**结论：pin 不能解。** 合并版比原 PR 大得多，按版本分了契约（2.9.5/2.9.6
+statusless、2.10+ 带 `status`、2.11+ 要 `bundled_execution_surface`、2.11.1+ 用
+finding ID）。下表那条 `recommendation` 不匹配的报错确实没有了——校验改成了
+"incomplete 且 LOW 时期望 CAUTION"——但 partial 报告只是从"整份丢弃"变成
+"保留 findings、扫描仍记为 incomplete"。触发源没变：2.11.1 对同一份 skill 仍然
+在 `SKILL.md:12` 记一条非致命的 `reference_unresolved`，`status` 仍是 `partial`。
+
+用 `tests/test_e2e_tier1.py` 的 fixture 实测（evaluator 为 `ff349e0`）：
+
+| SkillSpector | Security Scan | `incomplete_scans` | 说明 |
+| --- | --- | --- | --- |
+| 2.9.6 | passed | `[]` | pin 保持有效，升 evaluator 不退化 |
+| 2.10.0 | incomplete | `["skillspector"]` | `analysis_completeness reports incomplete analysis (status 'partial')` |
+| 2.11.1 | incomplete | `["skillspector"]` | 同上 |
+
+`incomplete_scans` 非空在本服务里就是 INCOMPLETE 且不复用，所以升 SkillSpector
+对文档型 skill 没有任何改善。解 pin 的前提与后续选项见
+[README](../../README.md) 的安装一节。
 
 ---
 
@@ -58,3 +73,9 @@ Three things worth noting:
 Environment: SkillEvaluator `3bfba44` (main, reports 0.2.1), SkillSpector installed via `uv tool install`, macOS / Python 3.13.
 
 Until this lands, we are pinning SkillSpector to `v2.9.6` downstream, with a regression test that fails on 2.10.0+ so we can tell when the pin is safe to drop.
+
+---
+
+*以上为 2026-09-01 写就的原文，未发出。它描述的失效形式（recommendation 与
+severity 不匹配、整份报告被丢弃）已被 `ff349e0` 修复；残留的 partial→incomplete
+问题见本文开头。*
