@@ -503,12 +503,44 @@ skill 不存在"。错误文案已经把两种可能都写上了，排查时先�
 `skill_id` 只在**一个来源内部**唯一。管理系统的资源 ID `42` 和 GitLab 的数字
 项目 ID `42` 是同一个字符串，两种接入并存时它们指向完全不同的东西。所以
 `evaluation_task` 与 `evaluation_result` 都带一列 `source`（`local` / `zip` /
-`gitlab`，见 `domain.ContentSource`），结果的唯一键是
-`(source, skill_id, content_hash)`。
+`gitlab`，见 `domain.ContentSource`）。
 
 不带这一维会怎样：GitLab 上 `group/repo` 的结论把管理系统里同名的那条
 **删掉**（`save_result` 是先删后插），排队去重把两个来源的触发**折叠**成一条
 任务。两种都不会报错，也不会留下日志，只是结论悄悄换成了另一个 skill 的。
+
+### 上下文也是身份的一部分
+
+结论的完整身份是 **`(source, skill_id, content_hash, context_hash)`**。同一个
+skill 单独评和在一组里评是**两条不同的结论**——跨 skill 链接一边是死链一边
+不是——而字节相同，所以 `content_hash` 也相同。GitLab 接入下这两条还共用
+`skill_id`：成员的 ID 就是它单独提交时会用的那个（这是有意的，见"一组耦合
+skill"）。四个值里少任何一个，两条结论就撞成一条。
+
+唯一性因此是**两条部分唯一索引**，不是一条四列唯一约束：
+
+```sql
+uq_skill_content_solo    UNIQUE (source, skill_id, content_hash)                 WHERE context_hash IS NULL
+uq_skill_content_bundle  UNIQUE (source, skill_id, content_hash, context_hash)   WHERE context_hash IS NOT NULL
+```
+
+拆开是因为 NULL：`context_hash` 为空表示"单独评的"，而 PostgreSQL 与 SQLite
+的唯一约束里 **NULL 互不相等**——一条四列约束对单评那批行等于没有约束，
+唯一性丢掉一半。按上下文在不在切成两半，各自在自己那半边才是真的唯一。
+
+不带 `context_hash` 会怎样（`9c2d5a71e4b8` 之前就是这样）：
+
+- 单评一个成员、再整组评一次，成员的结论落库时按三元组找到单评那条**删掉**。
+  之后按同一个 `skill_id` 查到的是"兄弟都在场时"评出来的结论，分数可能一模
+  一样，只是死链没了。反向同样成立。
+- 更常见的是根本不涉及单评：一个 bundle 改了一个成员重跑，**没改的那些成员**
+  `content_hash` 不变、`context_hash` 变了，旧行全被删。字节变过的成员两条都
+  在，没变的只剩一条——历史留不留取决于内容变没变，正好是反的。上一次那条
+  任务的 `results` 于是静默少几条（它按 `context_hash` 反查）。
+
+复用那边一直是卡死上下文的（`find_reusable_result`，NULL 与非 NULL 不互认），
+覆盖这边不卡就等于从后门把同一件事做成了，而且更彻底：复用是给出旧结论，
+覆盖是把旧结论删掉。三条 e2e 用例钉住（`test_e2e_bundle.py`，去掉修复全部变红）。
 
 **结论本身不分来源。** `find_reusable_result` 刻意不看 `source`，和它不看
 `skill_id` 是同一个理由：结论只取决于内容、评测器和策略。同一份字节从 zip
@@ -544,12 +576,25 @@ push webhook，就没有这个承接时刻了，那时才需要重新算这笔�
 
 列表页会出现 N 次单查（50 个 skill 打 50 次），需要时补一个批量查询接口。
 
-**查结果必须带 `content_hash`。** 两个查询端点都接受它：
+**查结果必须带 `content_hash`，最好连 `context_hash` 一起带。** 两个查询端点
+都接受这两个参数：
 
 ```
-GET /api/skills/{skill_id}/evaluation?content_hash=<hash>
-GET /api/skills/{skill_id}/report?content_hash=<hash>
+GET /api/skills/{skill_id}/evaluation?content_hash=<hash>&context_hash=<ctx>
+GET /api/skills/{skill_id}/report?content_hash=<hash>&context_hash=<ctx>
 ```
+
+`context_hash` 是**三态**的，空值不等于没给：
+
+| 传法 | 含义 |
+| --- | --- |
+| 不出现 | 不限上下文，回最近评完的那条 |
+| `context_hash=`（空） | 要**单独评**的那条 |
+| `context_hash=sha256:…` | 要那一组上下文下的那条 |
+
+空值必须能表达，否则单评的结论就永远指不到——它的上下文本来就是空的，而它和
+成员结论的 `(skill_id, content_hash)` 一模一样。任务接口 `results[]` 里的
+`context_hash` 原样回传即可（null 传成空值），不需要判断这次是哪种形态。
 
 拿 hash 的路径：提交返回 `task_id` → 轮 `GET /api/tasks/{task_id}` → 任务评完后
 `results` 里是这次产出的**每条**结论的寻址键 → 管理系统把它们和这次提交存在
@@ -562,9 +607,11 @@ GET /api/skills/{skill_id}/report?content_hash=<hash>
   "context_hash": "sha256:d4ac66…",
   "results": [
     {"skill_id": "group/repo:skills/code-review",
-     "content_hash": "sha256:8f3a0b…", "status": "passed", "report_url": "…"},
+     "content_hash": "sha256:8f3a0b…", "context_hash": "sha256:d4ac66…",
+     "status": "passed", "report_url": "…"},
     {"skill_id": "group/repo:skills/test-gen",
-     "content_hash": "sha256:1c77e2…", "status": "failed", "report_url": "…"}
+     "content_hash": "sha256:1c77e2…", "context_hash": "sha256:d4ac66…",
+     "status": "failed", "report_url": "…"}
   ]
 }
 ```
@@ -591,9 +638,9 @@ zip 接入每次上传换一个资源 ID，一个 `skill_id` 基本只有一条�
 同一个 ID 下，取到的是最近评完的那个 ref——详情页展示 v1.0.0，拿回来的可能
 是 main 的分数。
 
-**为什么不是按 ref 查。** 结论的身份是 `(skill_id, content_hash)`，
-`skill_version` 只是标签、不参与去重，`save_result` 同 `(skill_id, content_hash)`
-覆盖写。所以 tag `v1.0.0` 和分支 `main` 指向同一个 commit 时只有一行，标签是
+**为什么不是按 ref 查。** 结论的身份是
+`(source, skill_id, content_hash, context_hash)`，`skill_version` 只是标签、
+不参与去重，`save_result` 按这个身份覆盖写。所以 tag `v1.0.0` 和分支 `main` 指向同一个 commit 时只有一行，标签是
 后评的那个，按 ref 查会漏掉一份确实评过的内容。要按 ref 查得准得改结果表的
 身份键，那和"结论按内容复用、不看 skill_id"的整个缓存设计冲突。
 
@@ -613,14 +660,19 @@ SKILLPRISM_PUBLIC_BASE_URL=https://skillprism.internal
 {
   "skill_id": "group/repo:skills/log-triage",
   "content_hash": "sha256:9f2c…",
-  "report_url": "https://skillprism.internal/api/skills/group/repo:skills/log-triage/report?content_hash=sha256:9f2c…"
+  "context_hash": null,
+  "report_url": "https://skillprism.internal/api/skills/group/repo:skills/log-triage/report?source=gitlab&content_hash=sha256:9f2c…&context_hash="
 }
 ```
 
-**链接一定带 `content_hash`，而且带的是这条结论自己的那个。** 不带的话它的
-含义是"这个 skill 最近评完的那条"，会随后续评测漂走——理由和上面那节完全
-一样。区别在于链接会进管理系统的库、长期存在，到那时候"指错版本"比现在难查
-得多。`test_report_url_pins_the_hash_of_the_row_it_came_with` 钉住这条。
+**链接一定带 `content_hash` 与 `context_hash`，而且带的是这条结论自己的那两个。**
+不带的话它的含义是"这个 skill 最近评完的那条"，会随后续评测漂走——理由和上面
+那节完全一样。区别在于链接会进管理系统的库、长期存在，到那时候"指错版本"比
+现在难查得多。上下文更隐蔽一层：同一个 skill 单独评过、又在一组里评过时，
+两条结论的 `(skill_id, content_hash)` 一模一样，只带 `content_hash` 的链接会
+在两条之间跳。单评那条的上下文为空，链接里就是个空值——那不是"没写"，
+正是"要单独评的那条"。`test_report_url_pins_the_hash_of_the_row_it_came_with`
+钉住这条。
 
 **没配就是 `null`，不回落到存储地址。** 存储地址形如
 `file:///var/lib/skillprism/reports/…`，对方拿到什么也做不了，还把我们的

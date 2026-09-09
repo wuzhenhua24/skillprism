@@ -27,9 +27,9 @@ class ContentSource(StrEnum):
     git ref。所以同一个 ``skill_id`` 字符串在两边可能指向完全不同的东西——
     管理系统的资源 ID ``42`` 和 GitLab 的数字项目 ID ``42`` 就是一例。
 
-    结论与排队都必须带上这一维。不带的话两个来源会在
-    ``uq_skill_content`` 上互相覆盖、在排队去重时互相折叠，而且全程不报错
-    ——又回到"不报错，只是评错"。
+    结论与排队都必须带上这一维。不带的话两个来源会在结论的唯一索引上互相
+    覆盖（见 :class:`~skillprism.models.EvaluationResult`）、在排队去重时
+    互相折叠，而且全程不报错——又回到"不报错，只是评错"。
     """
 
     #: 开发用的本地目录（LocalDirectorySource）。它同样自成一个命名空间：

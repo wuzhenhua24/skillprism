@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -20,30 +21,81 @@ from skillprism.schemas import (
 )
 
 
+#: "调用方没有指定上下文"。必须和"指定了单独评"（``context_hash`` 为 ``None``）
+#: 区分开——后者是一个有含义的取值，不是"随便哪条"。
+ANY_CONTEXT: Any = object()
+
+
 def find_result(
-    session: Session, source: ContentSource, skill_id: str, content_hash: str
+    session: Session,
+    source: ContentSource,
+    skill_id: str,
+    content_hash: str,
+    *,
+    context_hash: str | None | Any = ANY_CONTEXT,
 ) -> EvaluationResult | None:
-    """按身份精确定位一条结论。身份是 (来源, skill_id, content_hash)。"""
+    """定位一条结论。身份是 **(来源, skill_id, content_hash, context_hash)**。
+
+    上下文是身份的一部分：同一个 skill 单独评（兄弟目录不在盘上，跨 skill
+    链接是死链）和在一组里评，字节相同、content_hash 相同，结论却不一样。
+    两条可以同时存在，见 :class:`~skillprism.models.EvaluationResult` 的两条
+    部分唯一索引。
+
+    ``context_hash`` 给了就精确匹配，包括显式给 ``None``——那表示"要单独评
+    的那条"，不是"不限"。**写路径必须显式给**（:func:`save_result`、
+    :func:`clone_result`）：不给就等于按三元组找，会把另一个上下文的结论当成
+    同一条删掉。
+
+    不给时回落到"最近评完的那条"。查询侧的老调用方只有三元组（补上下文之前
+    发出去的 report_url、管理系统库里存着的链接），对它们只能这样——但要
+    回一条确定的，不能因为查出多行就 500。取到的是哪条上下文，DTO 的
+    ``context_hash`` 里写着。
+    """
     stmt = select(EvaluationResult).where(
         EvaluationResult.source == str(source),
         EvaluationResult.skill_id == skill_id,
         EvaluationResult.content_hash == content_hash,
     )
+    if context_hash is ANY_CONTEXT:
+        # 多条上下文并存时给最近的一条。order by 不能省：不排序的"随便一条"
+        # 会随数据库的物理顺序变，同一个请求两次结果不同。
+        return session.execute(
+            stmt.order_by(EvaluationResult.evaluated_at.desc()).limit(1)
+        ).scalars().first()
+
+    stmt = stmt.where(
+        EvaluationResult.context_hash.is_(None)
+        if context_hash is None
+        else EvaluationResult.context_hash == context_hash
+    )
     return session.execute(stmt).scalar_one_or_none()
 
 
 def latest_result(
-    session: Session, source: ContentSource, skill_id: str
+    session: Session,
+    source: ContentSource,
+    skill_id: str,
+    *,
+    context_hash: str | None | Any = ANY_CONTEXT,
 ) -> EvaluationResult | None:
-    stmt = (
-        select(EvaluationResult)
-        .where(
-            EvaluationResult.source == str(source),
-            EvaluationResult.skill_id == skill_id,
-        )
-        .order_by(EvaluationResult.evaluated_at.desc())
-        .limit(1)
+    """这个 skill 最近评完的一条结论。
+
+    ``context_hash`` 是可选的过滤，语义同 :func:`find_result`：给了就只在那个
+    上下文里找（``None`` 表示单独评的那批），不给就不限。它和有没有指定
+    ``content_hash`` 是两件事——"最近一条单独评的结论"是个成立的问题，
+    不该因为没钉内容就退化成"最近一条，什么上下文都行"。
+    """
+    stmt = select(EvaluationResult).where(
+        EvaluationResult.source == str(source),
+        EvaluationResult.skill_id == skill_id,
     )
+    if context_hash is not ANY_CONTEXT:
+        stmt = stmt.where(
+            EvaluationResult.context_hash.is_(None)
+            if context_hash is None
+            else EvaluationResult.context_hash == context_hash
+        )
+    stmt = stmt.order_by(EvaluationResult.evaluated_at.desc()).limit(1)
     return session.execute(stmt).scalar_one_or_none()
 
 
@@ -203,7 +255,12 @@ def clone_result(
     origin 自己就挂在目标身份上时直接返回它，不做删了再插的空转——那一下
     会把 origin 删掉。worker 的判据不会走到这里，但这个函数不该依赖调用方。
     """
-    existing = find_result(session, source, skill_id, origin.content_hash)
+    # 上下文要显式带上：克隆出来的这条继承 origin 的 context_hash（见下面
+    # 的赋值），所以它可能撞上的只有同一上下文下的那条。不带的话会去删另一
+    # 个上下文的结论，而那条和这次克隆毫无关系。
+    existing = find_result(
+        session, source, skill_id, origin.content_hash, context_hash=origin.context_hash
+    )
     if existing is not None:
         if existing.id == origin.id:
             return origin
@@ -259,12 +316,20 @@ def save_result(
     report_html_uri: str | None = None,
     policy_file_hash: str | None = None,
 ) -> EvaluationResult:
-    """写入结果。同一 (source, skill_id, content_hash) 覆盖既有记录。
+    """写入结果。**同一 (source, skill_id, content_hash, context_hash)** 覆盖既有记录。
 
-    ``source`` 必须进覆盖判定：不带的话，GitLab 上 ``group/repo`` 的结论会
-    删掉管理系统里恰好也叫 ``group/repo`` 的那条，删得静悄悄。
+    四个值缺一不可，缺了都是静悄悄地删掉一条不该删的结论：
+
+    - ``source``：不带的话，GitLab 上 ``group/repo`` 的结论会删掉管理系统里
+      恰好也叫 ``group/repo`` 的那条。
+    - ``context_hash``：不带的话，整组评出来的成员结论会删掉这个 skill 单独
+      评的那条（反向亦然）——字节相同所以 content_hash 相同，但它们是两条
+      不同的结论。同一个 bundle 改一个成员重跑也走这条路：没改的成员
+      content_hash 不变、上下文变了，旧结论全被删。
     """
-    existing = find_result(session, source, dto.skill_id, dto.content_hash)
+    existing = find_result(
+        session, source, dto.skill_id, dto.content_hash, context_hash=dto.context_hash
+    )
     if existing is not None:
         session.delete(existing)
         session.flush()

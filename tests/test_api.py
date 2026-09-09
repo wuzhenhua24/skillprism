@@ -295,6 +295,11 @@ def test_report_url_pins_the_hash_of_the_row_it_came_with(client, public_domain,
     不带 hash 的链接会随后续评测漂走：GitLab 接入下 skill_id 是长期不变的
     仓库路径，多个 ref 的结论堆在同一个 ID 下。链接会进管理系统的库长期
     存在，那时指错版本比现在难查得多。
+
+    上下文同样要钉住：同一个 skill 单独评过、又在一组里评过时，两条结论的
+    (skill_id, content_hash) 一模一样，只带 content_hash 的链接会在两条之间
+    跳。单独评的那条上下文为空，链接里就是个空值——那不是"没写"，是"要单独
+    评的那条"。
     """
     skill_id = "group/repo:skills/log-triage"
     _seed_two_versions(skill_id, tmp_path / "reports")
@@ -305,7 +310,7 @@ def test_report_url_pins_the_hash_of_the_row_it_came_with(client, public_domain,
     assert dto["content_hash"] == "hash-main"
     assert dto["report_url"] == (
         f"{PUBLIC_BASE_URL}/api/skills/group/repo:skills/log-triage"
-        "/report?source=local&content_hash=hash-main"
+        "/report?source=local&content_hash=hash-main&context_hash="
     )
 
 
@@ -510,13 +515,69 @@ def test_a_bundle_task_hands_back_every_member_key(client):
         (f"{BUNDLE_ID}/test-gen", "hash-tg"),
     }
     # 交回来的键必须真的查得到——这条链路通不通就是本节的全部意义。
+    # 键含上下文：同一个 skill 单独评过时，(skill_id, content_hash) 会撞上，
+    # 原样回传 context_hash 才取得到确定的那条。
     for ref in task["results"]:
+        assert ref["context_hash"] == task["context_hash"]
         got = client.get(
             f"/api/skills/{ref['skill_id']}/evaluation",
-            params={"source": task["source"], "content_hash": ref["content_hash"]},
+            params={
+                "source": task["source"],
+                "content_hash": ref["content_hash"],
+                "context_hash": ref["context_hash"],
+            },
         )
         assert got.status_code == 200, got.json()
         assert got.json()["context_hash"] == task["context_hash"]
+
+
+def test_context_hash_picks_between_two_verdicts_on_one_key(client):
+    """同一个 skill 单独评过、又在一组里评过：两条结论共用 (skill_id, content_hash)。
+
+    它们本来就该同时存在（上下文是身份的一部分），所以查询必须有办法指定要
+    哪一条。空值不能当成"没给"——单独评的那条上下文就是空的，那样它就永远
+    指不到了。
+    """
+    import datetime as dt
+    import uuid
+
+    from skillprism.db import session_scope
+    from skillprism.models import EvaluationResult
+
+    skill_id = f"{BUNDLE_ID}/code-review"
+    rows = (
+        (None, 79.5, dt.datetime(2026, 9, 1)),
+        (CONTEXT, 91.0, dt.datetime(2026, 9, 2)),
+    )
+    with session_scope() as session:
+        for context_hash, score, when in rows:
+            session.add(
+                EvaluationResult(
+                    id=str(uuid.uuid4()),
+                    source="local",
+                    skill_id=skill_id,
+                    content_hash="hash-cr",
+                    context_hash=context_hash,
+                    status="passed",
+                    score=score,
+                    evaluated_at=when,
+                    severity_counts={},
+                    incomplete_scans=[],
+                )
+            )
+
+    def _get(**params):
+        return client.get(
+            f"/api/skills/{skill_id}/evaluation",
+            params={"source": "local", "content_hash": "hash-cr", **params},
+        ).json()
+
+    # 空值 = "要单独评的那条"，不是"没给"。
+    assert _get(context_hash="")["score"] == 79.5
+    assert _get(context_hash=CONTEXT)["score"] == 91.0
+    # 完全不带这个参数才是"不限"，回最近评完的那条——补上下文之前发出去的
+    # 链接走这条。给"随便一条"不行：那会随数据库的物理顺序变。
+    assert _get()["score"] == 91.0
 
 
 def test_a_bundle_task_does_not_call_the_group_hash_a_content_hash(client):
@@ -571,10 +632,11 @@ def test_a_solo_task_addresses_its_one_result_the_same_way(client, public_domain
         {
             "skill_id": skill_id,
             "content_hash": "hash-v1",
+            "context_hash": None,
             "status": "passed",
             "report_url": (
                 f"{PUBLIC_BASE_URL}/api/skills/{skill_id}"
-                "/report?source=local&content_hash=hash-v1"
+                "/report?source=local&content_hash=hash-v1&context_hash="
             ),
         }
     ]

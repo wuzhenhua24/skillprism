@@ -129,6 +129,11 @@ class TaskResultRef(BaseModel):
 
     skill_id: str
     content_hash: str
+    #: 这条结论所在的上下文，单独评的为 null。它也在寻址键里：同一个 skill
+    #: 单独评过、又在一组里评过时，两条结论的 (skill_id, content_hash) 完全
+    #: 相同，只有它不同。原样回传给查询端点（``?context_hash=``，null 传空）
+    #: 就取到确定的那条；不传则取最近评完的一条。
+    context_hash: str | None = None
     status: EvaluationStatus
     #: 同 :attr:`EvaluationDTO.report_url`：没配公开地址或这条结论没有报告
     #: 时为 null，不回落到内部存储地址。

@@ -435,10 +435,18 @@ sudo systemctl restart skillprism-api skillprism-worker
 `alembic upgrade head` 这一步不能漏。升级前先备份数据库文件——
 迁移可能改表结构，出问题时需要能退回去。
 
-**本次升级会改表**：`b91d7c4a5e02` 给任务与结论加了 `source` 列（内容来源
-进入身份，见 README「内容来源是身份的一部分」）。存量行统一回填成迁移里的
-`BACKFILL_SOURCE`（当前是 `gitlab`）——测试阶段这么定，正式接入前如果库里
-已有需要区分的结论，改那一行或升级后 `UPDATE` 一次。
+**本次升级会改表**，两条迁移：
+
+- `b91d7c4a5e02` 给任务与结论加了 `source` 列（内容来源进入身份，见 README
+  「内容来源是身份的一部分」）。存量行统一回填成迁移里的 `BACKFILL_SOURCE`
+  （当前是 `gitlab`）——测试阶段这么定，正式接入前如果库里已有需要区分的
+  结论，改那一行或升级后 `UPDATE` 一次。
+- `9c2d5a71e4b8` 把结论的唯一键换成两条部分唯一索引，让 `context_hash` 进入
+  身份（见 README「上下文也是身份的一部分」）。**升级不会撞**：新索引严格
+  弱于老约束，老约束下不重复的行在新索引下也不重复，不需要清理存量数据。
+  **降级可能撞**：升级之后单评与成组评的结论可以合法地共用一个
+  `(source, skill_id, content_hash)`，那时 `downgrade` 会因重复而失败，需要
+  人工决定丢哪条——迁移不替你删，删掉的是一条真实的结论。
 
 **升级 skillevaluator**——先在非生产环境跑 e2e 测试，尤其确认
 `test_security_scan_completes` 仍然通过；升级后存量 skill 的评分可能整体漂移，

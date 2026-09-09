@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 from urllib.parse import quote, urlencode
 
 from sqlalchemy.orm import Session
@@ -17,6 +18,7 @@ from skillprism.domain import ContentSource, EvaluationStatus, Tier
 from skillprism.materialize import MaterializeError, safe_relative_path
 from skillprism.models import EvaluationResult, EvaluationTask
 from skillprism.repository import (
+    ANY_CONTEXT,
     bundle_member_results,
     find_result,
     latest_result,
@@ -164,6 +166,7 @@ def lookup_result(
     skill_id: str,
     *,
     content_hash: str | None = None,
+    context_hash: str | None | Any = ANY_CONTEXT,
 ) -> EvaluationResult | None:
     """定位一条结论。给了 ``content_hash`` 就精确取，否则退回最近一条。
 
@@ -179,10 +182,17 @@ def lookup_result(
     取到的是最近评完的那个 ref。要指定版本必须带 content_hash——
     ``skill_version`` 只是标签，同一份内容被两个 ref 评过时会被后写的覆盖
     （见 :func:`repository.save_result`），按它查会漏。
+
+    ``content_hash`` 还不足以唯一确定一条结论：同一个 skill 单独评过、又在
+    一组里评过时，两条结论的 (skill_id, content_hash) 完全相同，只有上下文
+    不同（见 :func:`repository.find_result`）。所以 ``context_hash`` 可以一起
+    给——``None`` 表示"要单独评的那条"，不给表示不限、取最近评完的一条。
     """
     if content_hash:
-        return find_result(session, source, skill_id, content_hash)
-    return latest_result(session, source, skill_id)
+        return find_result(
+            session, source, skill_id, content_hash, context_hash=context_hash
+        )
+    return latest_result(session, source, skill_id, context_hash=context_hash)
 
 
 def report_url_for(row: EvaluationResult, public_base_url: str) -> str | None:
@@ -199,13 +209,24 @@ def report_url_for(row: EvaluationResult, public_base_url: str) -> str | None:
     """
     if not public_base_url or not row.report_html_uri:
         return None
+    # 上下文也要钉住，理由和 content_hash 一样、只是更隐蔽：同一个 skill
+    # 单独评过、又在一组里评过时，两条结论的 (skill_id, content_hash) 一模
+    # 一样。只带 content_hash 的链接于是指向"这两条里最近的那条"，会随后续
+    # 评测在两条之间跳。单独评的那条上下文为空，链接里就是个空值——那不是
+    # "没写"，正是"要单独评的那条"（见 lookup_result）。
     # skill_id 可能含 ``/``（GitLab 接入下它就是仓库路径），而路由是
     # ``{skill_id:path}``，斜杠必须保留字面量；``:`` 在路径段里合法，一并
     # 放行。其余照常编码——一个没编码的 ``?`` 或 ``#`` 会把后面的查询串截掉。
     path = quote(row.skill_id, safe="/:")
     # source 必须进链接：两种接入的 skill_id 是两个命名空间，只带
     # content_hash 的话，同名 ID 在另一个来源下也存在时会取到那一条。
-    query = urlencode({"source": row.source, "content_hash": row.content_hash})
+    query = urlencode(
+        {
+            "source": row.source,
+            "content_hash": row.content_hash,
+            "context_hash": row.context_hash or "",
+        }
+    )
     return f"{public_base_url.rstrip('/')}/api/skills/{path}/report?{query}"
 
 
@@ -215,6 +236,7 @@ def get_evaluation(
     skill_id: str,
     *,
     content_hash: str | None = None,
+    context_hash: str | None | Any = ANY_CONTEXT,
     public_base_url: str = "",
 ) -> EvaluationDTO | None:
     """取一条结论。``public_base_url`` 决定 ``report_url`` 拼不拼得出来。
@@ -223,7 +245,9 @@ def get_evaluation(
     ``source`` 是同一个理由：查询路径要能在测试里两种配置都跑到，不该依赖
     进程级的全局状态。
     """
-    row = lookup_result(session, source, skill_id, content_hash=content_hash)
+    row = lookup_result(
+        session, source, skill_id, content_hash=content_hash, context_hash=context_hash
+    )
     if row is None:
         return None
     return result_to_dto(row, report_url=report_url_for(row, public_base_url))
@@ -261,13 +285,19 @@ def task_results(
     if task.bundle:
         rows = bundle_member_results(session, source, task.skill_id, task.content_hash)
     else:
-        row = find_result(session, source, task.skill_id, task.content_hash)
+        # 显式 context_hash=None：单任务评的就是"单独评"那个上下文。不指明
+        # 的话会退回"最近一条"，而同一份内容在一组里也评过时，最近的那条是
+        # 成员结论——任务于是交回一把指向别人结论的钥匙。
+        row = find_result(
+            session, source, task.skill_id, task.content_hash, context_hash=None
+        )
         rows = [row] if row is not None else []
 
     return [
         TaskResultRef(
             skill_id=row.skill_id,
             content_hash=row.content_hash,
+            context_hash=row.context_hash,
             status=EvaluationStatus(row.status),
             report_url=report_url_for(row, public_base_url),
         )

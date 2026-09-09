@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from sqlalchemy import JSON, Boolean, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import JSON, Boolean, DateTime, Float, ForeignKey, Index, Integer, String, Text, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -79,11 +79,45 @@ class EvaluationTask(Base):
 
 class EvaluationResult(Base):
     __tablename__ = "evaluation_result"
-    #: 唯一键带 source：``skill_id`` 只在一个来源内部唯一。管理系统的资源 ID
-    #: ``42`` 和 GitLab 的数字项目 ID ``42`` 是同一个字符串，不带来源就会
-    #: 互相覆盖——覆盖没有任何症状，只是结论悄悄换了个 skill。
+    #: 结论的身份是 **(source, skill_id, content_hash, context_hash)** 四元组，
+    #: 唯一性因此拆成两条**部分唯一索引**，而不是一条四列的唯一约束。
+    #:
+    #: 拆开的理由是 NULL：``context_hash`` 为空表示"单独评的"，而 PostgreSQL
+    #: 与 SQLite 的唯一约束里 NULL 互不相等——四列约束对单评那批行等于没有
+    #: 约束（每条 NULL 都算不同值），唯一性丢掉一半。所以按上下文在不在分成
+    #: 两条，各自在自己那半边是真的唯一：
+    #:
+    #: - ``uq_skill_content_solo``：单独评的那批，(source, skill_id, content_hash)
+    #: - ``uq_skill_content_bundle``：成组评的那批，再加上 context_hash
+    #:
+    #: ``source`` 必须在里面：``skill_id`` 只在一个来源内部唯一，管理系统的
+    #: 资源 ID ``42`` 和 GitLab 的数字项目 ID ``42`` 是同一个字符串。
+    #:
+    #: ``context_hash`` 必须在里面：同一个 skill 单独评和在一组里评是**两条
+    #: 不同的结论**（跨 skill 链接一边是死链一边不是），字节相同所以
+    #: content_hash 也相同。键里不带它，后写的那条就会把先写的删掉——
+    #: 复用那边卡死了上下文（见 find_reusable_result），覆盖这边不卡就等于
+    #: 从后门把同一件事做成了，而且更彻底：复用是给出旧结论，覆盖是删掉它。
     __table_args__ = (
-        UniqueConstraint("source", "skill_id", "content_hash", name="uq_skill_content"),
+        Index(
+            "uq_skill_content_solo",
+            "source",
+            "skill_id",
+            "content_hash",
+            unique=True,
+            sqlite_where=text("context_hash IS NULL"),
+            postgresql_where=text("context_hash IS NULL"),
+        ),
+        Index(
+            "uq_skill_content_bundle",
+            "source",
+            "skill_id",
+            "content_hash",
+            "context_hash",
+            unique=True,
+            sqlite_where=text("context_hash IS NOT NULL"),
+            postgresql_where=text("context_hash IS NOT NULL"),
+        ),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)

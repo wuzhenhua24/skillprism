@@ -18,11 +18,12 @@ from datetime import UTC, datetime
 
 import pytest
 from sqlalchemy import create_engine
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import sessionmaker
 
 from skillprism.domain import ContentSource
 from skillprism.models import Base, EvaluationDetail, EvaluationResult
-from skillprism.repository import clone_result, find_reusable_result
+from skillprism.repository import clone_result, find_result, find_reusable_result
 
 CONTENT = "sha256:abc"
 EVALUATOR = "0.2.1"
@@ -277,3 +278,98 @@ def test_clone_onto_itself_leaves_the_row_alone(factory):
 
         assert same.id == origin.id
         assert session.get(EvaluationResult, origin.id) is not None
+
+
+# ---- 上下文是身份的一部分：唯一键与覆盖判定 ----
+#
+# 复用那边一直卡死了上下文（上面几条），但**覆盖**那边曾经没卡：唯一键是
+# (source, skill_id, content_hash)，不含 context_hash。于是同一个 skill 单独
+# 评的结论和它在一组里评出来的结论共用一个键，后写的把先写的删掉——复用是
+# "给出旧结论"，覆盖比它更彻底，是"把旧结论删掉"。
+
+
+BUNDLE_CTX = "sha256:whole-group"
+
+
+def test_solo_and_bundle_verdicts_coexist(factory):
+    """同一份字节的两条结论必须能同时存在。
+
+    单独评（兄弟目录不在盘上，跨 skill 链接是死链）和在一组里评是两个结论，
+    而字节相同所以 content_hash 相同。库层面挡住任何一条，上层就只能靠删。
+    """
+    with factory() as session:
+        _seed(session, skill_id="42", context_hash=None)
+        _seed(session, skill_id="42", context_hash=BUNDLE_CTX)
+        session.flush()
+
+        rows = session.query(EvaluationResult).filter_by(skill_id="42").all()
+        assert len(rows) == 2
+        assert {r.context_hash for r in rows} == {None, BUNDLE_CTX}
+
+
+@pytest.mark.parametrize("context_hash", [None, BUNDLE_CTX], ids=["solo", "bundle"])
+def test_one_identity_one_verdict_within_a_context(factory, context_hash):
+    """放开上下文这一维之后，各自那一半仍然必须唯一。
+
+    ``context_hash`` 可空，而 PostgreSQL 与 SQLite 的唯一约束里 NULL 互不
+    相等——四列唯一约束对单独评的那批行等于没有约束。所以拆成两条部分唯一
+    索引，这条用例把**两半都**跑到：漏掉 solo 那半的话，同一个 skill 会攒下
+    一堆同内容的结论，查询取到哪条全看排序。
+    """
+    with factory() as session:
+        _seed(session, skill_id="42", context_hash=context_hash)
+        session.flush()
+
+        # _seed 自己就 flush，所以这一句整体在 raises 里。
+        with pytest.raises(IntegrityError):
+            _seed(session, skill_id="42", context_hash=context_hash)
+
+
+def test_finding_a_verdict_needs_the_exact_context(factory):
+    """写路径按身份找既有行，身份含上下文——找错了就是删错人。"""
+    with factory() as session:
+        solo = _seed(session, skill_id="42", context_hash=None)
+        member = _seed(session, skill_id="42", context_hash=BUNDLE_CTX)
+        session.flush()
+
+        found_solo = find_result(session, ContentSource.ZIP, "42", CONTENT, context_hash=None)
+        found_member = find_result(
+            session, ContentSource.ZIP, "42", CONTENT, context_hash=BUNDLE_CTX
+        )
+        assert found_solo.id == solo.id
+        assert found_member.id == member.id
+
+
+def test_not_naming_a_context_gives_the_most_recent(factory):
+    """老调用方手里只有三元组（补上下文之前发出去的链接）。
+
+    查出多行不能 500，也不能给"随便一条"——那会随数据库的物理顺序变。
+    """
+    with factory() as session:
+        _seed(session, skill_id="42", context_hash=None,
+              evaluated_at=datetime(2026, 9, 1, tzinfo=UTC))
+        newer = _seed(session, skill_id="42", context_hash=BUNDLE_CTX,
+                      evaluated_at=datetime(2026, 9, 2, tzinfo=UTC))
+        session.flush()
+
+        assert find_result(session, ContentSource.ZIP, "42", CONTENT).id == newer.id
+
+
+def test_clone_does_not_delete_another_context(factory):
+    """克隆继承 origin 的上下文，所以它可能撞上的只有同一上下文那条。
+
+    不带上下文去找既有行的话，把一条毫不相干的结论删掉——而且没有任何症状。
+    """
+    with factory() as session:
+        solo = _seed(session, skill_id="42", context_hash=None)
+        origin = _seed(session, skill_id="99", context_hash=BUNDLE_CTX)
+        session.flush()
+
+        clone_result(
+            session, origin, source=ContentSource.ZIP, skill_id="42", skill_version="v2"
+        )
+        session.flush()
+
+        assert session.get(EvaluationResult, solo.id) is not None, "单评那条被克隆顶掉了"
+        rows = session.query(EvaluationResult).filter_by(skill_id="42").all()
+        assert {r.context_hash for r in rows} == {None, BUNDLE_CTX}

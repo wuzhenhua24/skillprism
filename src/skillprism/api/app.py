@@ -18,7 +18,7 @@ from skillprism.domain import ContentSource
 from skillprism.embedding_shim import router as embedding_shim_router
 from skillprism.materialize import MaterializeError, UnsafePathError
 from skillprism.models import EvaluationTask
-from skillprism.repository import skill_ids_with_context
+from skillprism.repository import ANY_CONTEXT, skill_ids_with_context
 from skillprism.runner import preflight
 from skillprism.schemas import (
     EvaluationDTO,
@@ -277,11 +277,31 @@ def _no_result_detail(
     return f"该 skill 没有 content_hash={content_hash} 的评测结果"
 
 
+def _query_context(context_hash: str | None):
+    """把查询串里的 ``context_hash`` 翻成 :func:`repository.find_result` 的取值。
+
+    三态，不是两态：
+
+    - 参数没出现 → ``ANY_CONTEXT``，不限上下文，取最近评完的一条。补上下文
+      之前发出去的链接（管理系统库里存着的 report_url）走的就是这条。
+    - ``?context_hash=``（空值）→ ``None``，**要单独评的那条**。任务接口里
+      单评结论的 ``context_hash`` 就是 null，原样回传即是空值。
+    - ``?context_hash=sha256:…`` → 精确取那一组上下文下的那条。
+
+    空值不能当成"没给"：那样单评结论就没有办法被精确指定，而它和成员结论的
+    (skill_id, content_hash) 完全一样。
+    """
+    if context_hash is None:
+        return ANY_CONTEXT
+    return context_hash or None
+
+
 @app.get("/api/skills/{skill_id:path}/evaluation", response_model=EvaluationDTO)
 def get_evaluation(
     skill_id: str,
     source: str | None = None,
     content_hash: str | None = None,
+    context_hash: str | None = None,
     session: Session = Depends(get_db),
 ) -> EvaluationDTO:
     """取一条结论。
@@ -289,6 +309,11 @@ def get_evaluation(
     ``source`` 指明在哪个接入的命名空间里找。只启用了一种接入时可以省略；
     两种都启用时必须带——``skill_id`` 只在一个来源内部唯一，省了就可能取到
     另一个接入下同名的那条。
+
+    ``content_hash`` 单独还不足以定位：同一个 skill 单独评过、又在一组里评过
+    时，两条结论的 (skill_id, content_hash) 一模一样，只有 ``context_hash``
+    不同。把任务接口 ``results[]`` 里的那两个值一起回传就取到确定的那条，
+    见 :func:`_query_context`。
     """
     kind = query_source(source)
     dto = service.get_evaluation(
@@ -296,6 +321,7 @@ def get_evaluation(
         kind,
         skill_id,
         content_hash=content_hash,
+        context_hash=_query_context(context_hash),
         public_base_url=get_settings().public_base_url,
     )
     if dto is None:
@@ -310,6 +336,7 @@ def get_report(
     skill_id: str,
     source: str | None = None,
     content_hash: str | None = None,
+    context_hash: str | None = None,
     session: Session = Depends(get_db),
 ) -> FileResponse:
     """回传 SkillEvaluator 生成的 HTML 报告。
@@ -319,11 +346,18 @@ def get_report(
     会作为 ``report_url`` 随结论一起回给管理系统，由最终用户直接点开——
     所以响应带上 :data:`REPORT_SECURITY_HEADERS`。
 
-    ``source`` 与 ``content_hash`` 都和 ``/evaluation`` 同义，两边必须一起带：
-    只在一边带，拿到的结论和报告可能来自不同版本、甚至不同接入。
+    ``source``、``content_hash`` 与 ``context_hash`` 都和 ``/evaluation`` 同义，
+    两边必须一起带：只在一边带，拿到的结论和报告可能来自不同版本、不同上下文、
+    甚至不同接入。
     """
     kind = query_source(source)
-    row = service.lookup_result(session, kind, skill_id, content_hash=content_hash)
+    row = service.lookup_result(
+        session,
+        kind,
+        skill_id,
+        content_hash=content_hash,
+        context_hash=_query_context(context_hash),
+    )
     path = service.report_path(row.report_html_uri) if row else None
     if path is None:
         detail = "报告不存在" if row else _no_result_detail(session, kind, content_hash)

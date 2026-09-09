@@ -252,6 +252,123 @@ def test_the_task_hands_back_keys_that_actually_resolve(env):
             assert got.context_hash == dto.context_hash
 
 
+# ---- 单评与成组评共用一个 skill_id 时，两条结论各自留着 ----
+#
+# GitLab 接入下"成员的 skill_id 就是它单独提交时会用的那个"是有意的设计
+# （member_skill_id 与 join_skill_id 拼出同一个字符串），所以这两条结论天生
+# 共用 (source, skill_id, content_hash)——同一份成员文件、同一个目录名。
+# LocalDirectorySource 按 <root>/<skill_id> 取内容，用嵌套 ID 提交就复刻出
+# 同一个形态。
+
+
+NESTED_ID = f"{BUNDLE_ID}/code-review"
+
+
+def _dead_link(dto) -> bool:
+    return any("../test-gen/SKILL.md" in m for m in _problems(dto, "integrity"))
+
+
+def _bundle_context(db) -> str:
+    """库里那条 bundle 任务记下的整组指纹，也就是成员结论的 context_hash。"""
+    return db.query(EvaluationTask).filter_by(bundle=True).one().content_hash
+
+
+@needs_cli
+@needs_scanners
+def test_a_later_bundle_does_not_overwrite_the_solo_verdict(env):
+    """先单评、再整组评：两条结论都要在，而且各是各的。
+
+    上下文一度不在唯一键里，于是整组评出来的成员结论落库时按
+    (source, skill_id, content_hash) 找到单评那条**删掉**。删得静悄悄：字节
+    相同、分数可能一模一样，只是死链没了——之后按同一个 skill_id 查到的是
+    "兄弟都在场时"评出来的结论，却挂着单评的身份。
+    """
+    _run(env, SubmitRequest(skill_id=NESTED_ID, skill_name="code-review"))
+    _run(env, SubmitRequest(skill_id=BUNDLE_ID, bundle=True))
+
+    with session_scope() as db:
+        solo = get_evaluation(db, ContentSource.LOCAL, NESTED_ID, context_hash=None)
+        member = get_evaluation(
+            db, ContentSource.LOCAL, NESTED_ID, context_hash=_bundle_context(db)
+        )
+
+    assert solo is not None, "单评的结论被整组评顶掉了"
+    assert solo.context_hash is None
+    assert member is not None and member.context_hash is not None
+    # 同样的字节 → 同一个 content_hash；上下文不同 → 两个结论。
+    assert solo.content_hash == member.content_hash
+    assert _dead_link(solo), "单评本来就该报死链——兄弟目录不在盘上"
+    assert not _dead_link(member), "整组评里跨 skill 链接不该是死链"
+
+
+@needs_cli
+@needs_scanners
+def test_a_later_solo_run_does_not_overwrite_the_member_verdict(env):
+    """反向：先整组评、再单评。
+
+    这个方向的症状更隐蔽——成员结论被删之后，那次 bundle 任务的 ``results[]``
+    按 context_hash 反查，于是**静默少一条**：没有报错，列表只是短了一截。
+    """
+    _run(env, SubmitRequest(skill_id=BUNDLE_ID, bundle=True))
+    with session_scope() as db:
+        before = len(task_to_dto(db, db.query(EvaluationTask).one()).results)
+
+    _run(env, SubmitRequest(skill_id=NESTED_ID, skill_name="code-review"))
+
+    with session_scope() as db:
+        bundle_task = (
+            db.query(EvaluationTask).filter_by(skill_id=BUNDLE_ID).one()
+        )
+        after = task_to_dto(db, bundle_task)
+
+    assert before == len(MEMBERS)
+    assert len(after.results) == before, "单评把 bundle 的成员结论顶掉了"
+    for ref in after.results:
+        assert ref.context_hash == after.context_hash
+
+
+@needs_cli
+@needs_scanners
+def test_retriggering_a_bundle_keeps_the_earlier_task_resolvable(env):
+    """改一个成员重跑整组——**没改的那些成员**是撞键的重灾区。
+
+    它们的字节没变、content_hash 不变，只有 context_hash 变了。上下文不在键里
+    的时候，旧行全被新行删掉：字节变过的成员两条都在，没变的只剩一条，
+    历史留不留取决于内容变没变，正好是反的。上一次那条任务的 ``results[]``
+    于是静默少几条，而它交回的键本该是长期可用的。
+
+    这条路径不需要任何单评参与，是 bundle 最日常的操作。
+    """
+    _run(env, SubmitRequest(skill_id=BUNDLE_ID, bundle=True))
+    with session_scope() as db:
+        first_id = db.query(EvaluationTask).one().id
+        first_keys = [
+            (r.skill_id, r.content_hash, r.context_hash)
+            for r in task_to_dto(db, db.get(EvaluationTask, first_id)).results
+        ]
+
+    member = env.local_skills_root / BUNDLE_ID / "test-gen" / "SKILL.md"
+    member.write_text(TEST_GEN_MD + "\n补一句，只动这一个成员。\n", encoding="utf-8")
+    _run(env, SubmitRequest(skill_id=BUNDLE_ID, bundle=True))
+
+    with session_scope() as db:
+        again = task_to_dto(db, db.get(EvaluationTask, first_id))
+        assert [
+            (r.skill_id, r.content_hash, r.context_hash) for r in again.results
+        ] == first_keys, "第一次那条任务交回的键在重跑之后不成立了"
+
+        # 交回的键还得真能查到结论，不能只是列表长度对上。
+        for ref in again.results:
+            got = lookup_result(
+                db,
+                ContentSource.LOCAL,
+                ref.skill_id,
+                content_hash=ref.content_hash,
+                context_hash=ref.context_hash,
+            )
+            assert got is not None, f"查不到：{ref.skill_id}"
+
+
 #: 两个成员用**逐字节相同**的 SKILL.md，frontmatter 的 name 都写 alpha。
 #: 于是 alpha/ 的目录名与它一致、beta/ 的不一致——同样的字节，两个结论。
 TWIN_MD = """---
