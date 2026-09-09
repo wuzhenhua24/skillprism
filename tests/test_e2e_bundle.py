@@ -162,7 +162,7 @@ def test_alone_reports_dead_link(env):
 @needs_scanners
 def test_bundle_resolves_cross_skill_links(env):
     """整套一起评：同样的内容，跨 skill 链接不再是死链。"""
-    _run(env, SubmitRequest(skill_id=BUNDLE_ID, skill_name=BUNDLE_ID, bundle=True))
+    _run(env, SubmitRequest(skill_id=BUNDLE_ID, bundle=True))
 
     with session_scope() as db:
         for member in MEMBERS:
@@ -180,7 +180,7 @@ def test_bundle_stores_one_result_per_member(env):
 
     这样管理系统不需要第二套查询方式：查一个成员和查任何别的 skill 一样。
     """
-    _run(env, SubmitRequest(skill_id=BUNDLE_ID, skill_name=BUNDLE_ID, bundle=True))
+    _run(env, SubmitRequest(skill_id=BUNDLE_ID, bundle=True))
 
     with session_scope() as db:
         dtos = {m: get_evaluation(db, ContentSource.LOCAL, f"{BUNDLE_ID}/{m}") for m in MEMBERS}
@@ -205,7 +205,7 @@ def test_bundle_context_is_not_reused_across_shapes(env):
     而且看起来完全正常。
     """
     _run(env, SubmitRequest(skill_id="code-review", skill_name="code-review"))
-    _run(env, SubmitRequest(skill_id=BUNDLE_ID, skill_name=BUNDLE_ID, bundle=True))
+    _run(env, SubmitRequest(skill_id=BUNDLE_ID, bundle=True))
 
     with session_scope() as db:
         solo = get_evaluation(db, ContentSource.LOCAL, "code-review")
@@ -231,7 +231,7 @@ def test_the_task_hands_back_keys_that_actually_resolve(env):
     中间没有一步报错。所以成员各自的寻址键必须由任务接口交出来，而且交出来
     的键得真的查得到。
     """
-    _run(env, SubmitRequest(skill_id=BUNDLE_ID, skill_name=BUNDLE_ID, bundle=True))
+    _run(env, SubmitRequest(skill_id=BUNDLE_ID, bundle=True))
 
     with session_scope() as db:
         task = db.query(EvaluationTask).one()
@@ -294,7 +294,7 @@ def test_two_identical_members_keep_their_own_verdicts(env):
         (root / member).mkdir(parents=True)
         (root / member / "SKILL.md").write_text(TWIN_MD, encoding="utf-8")
 
-    _run(env, SubmitRequest(skill_id=TWINS_ID, skill_name=TWINS_ID, bundle=True))
+    _run(env, SubmitRequest(skill_id=TWINS_ID, bundle=True))
 
     with session_scope() as db:
         alpha = get_evaluation(db, ContentSource.LOCAL, f"{TWINS_ID}/alpha")
@@ -321,7 +321,7 @@ def test_two_identical_members_keep_their_own_verdicts(env):
     )
 
     # 再触发一次同样的内容：走全命中缓存那条路，结论必须原封不动。
-    _run(env, SubmitRequest(skill_id=TWINS_ID, skill_name=TWINS_ID, bundle=True))
+    _run(env, SubmitRequest(skill_id=TWINS_ID, bundle=True))
 
     with session_scope() as db:
         alpha_again = get_evaluation(db, ContentSource.LOCAL, f"{TWINS_ID}/alpha")

@@ -39,6 +39,10 @@ def validate_skill_name(name: str) -> None:
     提前做一次是因为 skill_name 是调用方直接给的字段：给一个当场可改的
     422，比让任务在十秒后失败、再让人去翻任务状态要好。内容不能这样处理
     ——提交时还没下载，看不见。
+
+    只对单 skill 调用。bundle 的物化目录名不来自这个字段（见
+    :func:`~skillprism.materialize.materialize_bundle`），那里校验它等于用一条
+    与结果无关的规则去拦触发。
     """
     if len(safe_relative_path(name).parts) != 1:
         raise MaterializeError(f"skill_name 必须是单段名字，不能含路径分隔符：{name!r}")
@@ -92,7 +96,15 @@ def submit(
     定位是"只展示不拦截"，我们挂了不该反映到他们的上传体验上。
     下载、算 hash、查缓存全部由 worker 承担。
     """
-    validate_skill_name(request.skill_name)
+    # bundle 时登记名不参与任何计算（见 SubmitRequest.skill_name），在这里就
+    # 归一成 None，后面两条路径都用它、不再碰 request.skill_name：
+    #   - 不校验：为一个随后被丢弃的值返回 422，会拿"名字里有斜杠"拦住一次
+    #     本来完全合法的整组触发；
+    #   - 不落库：存下来就会从 TaskDTO 回显出去，任务状态里于是有一个看起来
+    #     权威、实际没参与任何计算的名字。
+    skill_name = None if request.bundle else request.skill_name
+    if skill_name is not None:
+        validate_skill_name(skill_name)
 
     if not request.force:
         # 触发接口天然会被重试（对方超时重发、用户连点保存），排队中的
@@ -117,7 +129,10 @@ def submit(
             #
             # source.version_selects_content 为真时版本已经在去重键里，这里的赋值
             # 是个恒等操作；留着是为了两条路径只有一份身份更新逻辑。
-            existing.skill_name = request.skill_name
+            # 形态也可能在这一次翻转（见下面 existing.bundle），所以这里赋的
+            # 是按本次形态归一过的值：单 skill 折进 bundle 时名字要跟着清掉，
+            # 反过来则要补上。
+            existing.skill_name = skill_name
             existing.skill_version = request.skill_version
             # bundle 意图也要跟上：折叠进去的那条还没下载内容，用旧意图跑
             # 会按错误的形态解归档，报一个和本次触发无关的错。
@@ -134,7 +149,7 @@ def submit(
         session,
         source=source,
         skill_id=request.skill_id,
-        skill_name=request.skill_name,
+        skill_name=skill_name,
         skill_version=request.skill_version,
         tier=request.tier,
         force=request.force,

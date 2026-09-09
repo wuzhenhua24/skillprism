@@ -348,7 +348,6 @@ def test_the_task_hash_is_the_context_the_members_carry(worker_env):
             db,
             source=ContentSource.LOCAL,
             skill_id=BUNDLE_ID,
-            skill_name="dev-workflow",
             bundle=True,
         )
 

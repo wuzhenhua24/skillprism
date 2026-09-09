@@ -231,6 +231,11 @@ def _process_bundle(
 
     返回的是**整体**状态：任一成员出错即 ERROR，全部通过才算通过。单个成员
     的结论各自落库，查询按成员的 skill_id 取。
+
+    这条路径**完全不看 task.skill_name**，这是有意的：一次提交对应多个 skill，
+    登记名只有一个、给不出 N 个。目录名与指纹一律取仓库里的成员目录名——那
+    本来就是作者写进 frontmatter 的那个，name_consistency 该怎么判就怎么判。
+    提交侧因此也不再存这个字段（见 :func:`skillprism.service.submit`）。
     """
     skill_dir = work_dir / "skill"
     out_dir = work_dir / "reports"

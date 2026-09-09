@@ -99,6 +99,33 @@ def test_gitlab_endpoint_leaves_a_missing_ref_empty(both):
     assert _task(resp.json()["task_id"]).skill_version is None
 
 
+def test_gitlab_endpoint_takes_a_bundle_without_a_skill_name(both):
+    """整组触发时登记名没有位置可放——目录有 N 个，名字只有一个。
+
+    GitLab 是 bundle 的主要来源（plugin 仓的 skills/ 那一层），所以这条要在
+    具名入口上单独钉住，不能只靠保留通道的测试。
+    """
+    resp = both.post(
+        "/api/evaluations/gitlab",
+        json={"project": "group/repo", "subdir": "skills", "bundle": True},
+    )
+    assert resp.status_code == 202
+
+    task = _task(resp.json()["task_id"])
+    assert task.bundle is True
+    assert task.skill_name is None
+
+
+def test_gitlab_endpoint_still_requires_a_skill_name_for_a_single_skill(both):
+    """单 skill 那边一个字没松：缺了就只能拿 skill_id 当目录名，
+    而 GitLab 下它是 ``项目:子目录``，name_consistency 必报。"""
+    resp = both.post(
+        "/api/evaluations/gitlab",
+        json={"project": "group/repo", "subdir": "skills/log-triage"},
+    )
+    assert resp.status_code == 422
+
+
 @pytest.mark.parametrize(
     ("payload", "reason"),
     [

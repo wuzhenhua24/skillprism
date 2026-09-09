@@ -317,7 +317,7 @@ POST /api/evaluations/gitlab
 
 下面三条语义两个入口都适用：
 
-**`skill_name` 是必填的，不能省。** 物化目录用它命名，SkillEvaluator 的
+**`skill_name` 单 skill 必填，整组触发时省略。** 物化目录用它命名，SkillEvaluator 的
 `SCHEMA.name_consistency`（HIGH）会拿目录名和 frontmatter 的 `name` 比对。
 管理系统的 skill_id 是纯数字资源 ID，拿它当目录名会让**每个** skill 都平白
 多一条 HIGH。也不能拿包里的目录名或 frontmatter 自己回填——那样这条检查
@@ -334,6 +334,11 @@ POST /api/evaluations/gitlab
 frontmatter**。从包里取等于自己和自己比，探针就废了；从对方的登记记录取，
 两边才是两个可以互相印证的来源。这也是不把这条检查在 `internal.yaml` 里
 关掉的理由：它不产生噪声（永远不报），却能在集成出问题时立刻出声。
+
+`bundle` 为 true 时这个字段**不参与任何计算**，省略即可（见"一组耦合 skill"）。
+一次提交对应 N 个 skill，登记名只有一个、给不出 N 个：整组物化的 catalog 根
+固定叫 `skills/`，成员目录名和成员指纹都取仓库里的那个。传了不报错——保留通道
+的老调用方还在传——但会被丢弃，任务状态里 `skill_name` 回显为 `null`。
 
 **202 是受理，不是评完，也不代表 skill 存在。** 提交路径上没有任何网络调用：
 这个接口挂在用户的上传流程后面，同步下载意味着对方要承担我们的网络耗时
@@ -674,11 +679,16 @@ script），这套 CSP 不影响它渲染——已在浏览器里实跑验证，
 ```json
 {
   "skill_id": "group/repo:skills",
-  "skill_name": "dev-workflow",
   "skill_version": "v1.2.0",
   "bundle": true
 }
 ```
+
+**没有 `skill_name`。** 单 skill 靠它命名物化目录，而这里目录有 N 个、登记名
+只有一个：整组物化的 catalog 根固定叫 `skills/`，成员目录名直接用仓库里的那个
+（本来就是作者写在 frontmatter 里的），`name_consistency` 该怎么判就怎么判。
+所以这个字段在整组触发时既不命名什么、也不进任何 hash。传了会被接受并丢弃
+（老调用方还在传），任务状态里回显为 `null`。
 
 由触发方声明，我们**不看内容形态推断**：`skill_id` 少写一层子目录就会静默
 变成评另一批东西。声明与内容不符时任务直接失败并说明原因（根上有 `SKILL.md`

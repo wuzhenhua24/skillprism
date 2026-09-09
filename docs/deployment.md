@@ -404,8 +404,10 @@ sleep 20
 curl -s http://127.0.0.1:8000/api/skills/demo/evaluation | python3 -m json.tool
 ```
 
-`skill_name` 必填，且要与 `SKILL.md` 里 frontmatter 的 `name` 一致——物化目录用它
-命名，对不上会多出一条 `SCHEMA.name_consistency`。
+`skill_name` 单 skill 必填，且要与 `SKILL.md` 里 frontmatter 的 `name` 一致——物化
+目录用它命名，对不上会多出一条 `SCHEMA.name_consistency`。整组触发
+（`bundle: true`）时省略：那时目录名取仓库里的成员目录名，这个字段不参与任何
+计算，传了也会被丢弃。
 
 `status` 只要不是 `error` 就说明链路通了。若为 `incomplete`，
 看 `evaluator.incomplete_scans` 里是谁。
@@ -569,7 +571,7 @@ worker 写的报告，所以两者必须同机。要真正横向扩展需要先�
 | 每个 skill 都多出 `folder_hierarchy` | 物化布局异常 | 物化时没套上 `skills/` 那层，见 materialize.py |
 | 任务报"不是一个可评测的 skill" | 多半是传了非 Skills 分类的包 | Commands / Agents / Hooks 里没有 `SKILL.md`。触发方应当只对 Skills 分类调用，找对接方查触发侧的过滤；不是用户的包坏了 |
 | 任务 error，日志写"取不到内容：找不到 skill" | 走本地目录时 `SKILLPRISM_LOCAL_SKILLS_ROOT` 与实际目录不一致 | 该变量不设会默认成相对路径 `./var/skills`，即 `/opt/skillprism/var/skills`。按第五节显式配成绝对路径 |
-| 提交返回 422 `skill_name Field required` | 触发请求少了必填字段 | `skill_name` 是管理系统里登记的技能名，见第七节与 README 的接口说明 |
+| 提交返回 422 `skill_name 必填` | 单 skill 触发少了这个字段 | 它是管理系统里登记的技能名，见第七节与 README 的接口说明。`bundle: true` 不需要它 |
 | 评测长时间不返回、最终超时，机器出网受限 | 扫描器在联网（版本检查、metrics 上报） | 本服务已默认关掉 semgrep 的这两项。仍然卡就用 `SKILLPRISM_SCANNER_ENV` 加开关，**不要**去写 `~/.semgrep/settings.yml`——`disable_version_check` 不是 semgrep 认的键，写了也不生效 |
 | `/healthz` 的 `version` 是 `null`，但服务能起 | 取版本的子进程超时或失败 | 看 worker/api 日志里 `skillevaluator --version` 那条 warning |
 | 任务卡在 `queued` | worker 没运行 | `systemctl status skillprism-worker` |

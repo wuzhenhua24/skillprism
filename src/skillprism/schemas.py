@@ -8,9 +8,22 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from skillprism.domain import EvaluationStatus, Severity, Tier
+
+
+def _check_skill_name(name: str | None, *, bundle: bool) -> None:
+    """单 skill 必须给登记名；bundle 给了也没用，所以不强求。
+
+    写成模型级校验而不是 ``Field(min_length=1)``，是因为这个"必填"是**有条件
+    的**——条件在兄弟字段 ``bundle`` 上，字段级约束看不见它。
+    """
+    if not bundle and not name:
+        raise ValueError(
+            "skill_name 必填：物化目录用它命名，缺了只能退回拿 skill_id 当目录名，"
+            "SCHEMA.name_consistency 会对每个 skill 报一条 HIGH"
+        )
 
 
 class Finding(BaseModel):
@@ -144,6 +157,9 @@ class TaskDTO(BaseModel):
     #: 显那个值，而不是 500——worker 那边也是照实报错再让任务作废。
     source: str
     skill_id: str
+    #: 触发时声明的登记名。bundle 任务为 null——整组物化不用它命名
+    #: （catalog 根固定叫 ``skills/``、成员目录用仓库里的名字），提交时给了
+    #: 也不会落库。见 :attr:`SubmitRequest.skill_name`。
     skill_name: str | None = None
     skill_version: str | None = None
     #: 这次评的是不是一组耦合 skill。必须暴露：上面两个 hash 字段的含义由
@@ -180,10 +196,20 @@ class SubmitRequest(BaseModel):
 
     #: 管理系统里的资源 ID，也是拼下载地址用的那个 ID。
     skill_id: str
-    #: 管理系统里登记的 skill 名，必填。物化目录用它命名，
-    #: SkillEvaluator 的 SCHEMA.name_consistency 会拿它和 frontmatter 比对。
-    #: 用 skill_id（数字 ID）代替会让每个 skill 都平白多一条 HIGH。
-    skill_name: str = Field(min_length=1, max_length=255)
+    #: 管理系统里登记的 skill 名。物化目录用它命名，SkillEvaluator 的
+    #: SCHEMA.name_consistency 会拿它和 frontmatter 比对；用 skill_id
+    #: （数字 ID）代替会让每个 skill 都平白多一条 HIGH。
+    #:
+    #: **单 skill 必填；``bundle`` 为 true 时不参与任何计算。**一次提交对应
+    #: 多个 skill，登记名只有一个，给不出 N 个：整组物化时 catalog 根固定叫
+    #: ``skills/``、不与任何 frontmatter 比对，成员目录名直接用仓库里的那个
+    #: （见 ``materialize_bundle``），成员指纹也按各自的目录名算。所以 bundle
+    #: 下它既不命名什么、也不进任何 hash——省略即可。
+    #:
+    #: 传了不报错（保留通道的老调用方还在传），但会被丢弃：不落库，任务状态
+    #: 里回显为 null。不改成拒收是因为那会打断已经在传的调用方；不静默存下来
+    #: 是因为回显一个没参与计算的名字，正是这个字段一直在误导人的地方。
+    skill_name: str | None = Field(default=None, max_length=255)
     #: 用户在管理系统上传时手填的自由文本，与包内 frontmatter 的版本无关。
     #: 上限必须在这里卡住：超长时 PostgreSQL 会抛错而 SQLite 照单全收，
     #: 那是只在生产暴露的故障。
@@ -197,6 +223,11 @@ class SubmitRequest(BaseModel):
     #: 必须由触发方声明，我们不看内容形态推断——``skill_id`` 少写一层子目录
     #: 就会静默变成评另一批东西。声明与内容不符时任务直接失败并说明原因。
     bundle: bool = False
+
+    @model_validator(mode="after")
+    def _check_name(self) -> SubmitRequest:
+        _check_skill_name(self.skill_name, bundle=self.bundle)
+        return self
 
 
 class GitLabSubmitRequest(BaseModel):
@@ -222,13 +253,19 @@ class GitLabSubmitRequest(BaseModel):
     #: 它**决定取到哪份内容**，这一点和 zip 接入的自由文本版本号不同，
     #: 所以它进排队去重的键（见 ContentSource.version_selects_content）。
     ref: str | None = Field(default=None, max_length=128)
-    #: 同 SubmitRequest.skill_name：物化目录用它命名，会和 frontmatter 比对。
-    skill_name: str = Field(min_length=1, max_length=255)
+    #: 同 :attr:`SubmitRequest.skill_name`：物化目录用它命名，会和 frontmatter
+    #: 比对；``bundle`` 为 true 时不参与任何计算，省略即可。
+    skill_name: str | None = Field(default=None, max_length=255)
     tier: Tier = Tier.TIER1
     force: bool = False
     #: ``project`` + ``subdir`` 指向装着多个 skill 的父目录，例 ``skills``。
     #: Claude plugin 形态的仓库要指到 ``skills`` 那一层，不是仓库根。
     bundle: bool = False
+
+    @model_validator(mode="after")
+    def _check_name(self) -> GitLabSubmitRequest:
+        _check_skill_name(self.skill_name, bundle=self.bundle)
+        return self
 
 
 class SubmitResponse(BaseModel):

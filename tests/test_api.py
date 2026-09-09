@@ -88,6 +88,65 @@ def test_unusable_skill_name_is_rejected_at_submit(client, name):
     assert resp.status_code == 422
 
 
+def test_bundle_does_not_require_skill_name(client):
+    """一组 skill 只能给一个登记名，而它要命名的目录有 N 个——所以整组触发时
+    这个字段根本没有位置可放，不该拿"必填"逼调用方编一个。
+
+    整组物化时 catalog 根固定叫 skills/，成员目录名取仓库里的那个
+    （materialize_bundle），成员指纹也按目录名算（worker._process_bundle）。
+    登记名从头到尾没有出场。
+    """
+    resp = client.post(
+        "/api/evaluations", json={"skill_id": "group/repo:skills", "bundle": True}
+    )
+    assert resp.status_code == 202
+
+
+def test_bundle_drops_the_skill_name_instead_of_echoing_it(client):
+    """传了不报错——保留通道的老调用方还在传——但不能存下来再回显。
+
+    存下来的后果就是这个字段一直以来的问题：任务状态里出现一个看起来权威、
+    实际没参与任何计算的名字，对接方于是以为自己得为 47 个成员挑对一个。
+    """
+    task_id = client.post(
+        "/api/evaluations",
+        json={"skill_id": "group/repo:skills", "skill_name": "dev-workflow", "bundle": True},
+    ).json()["task_id"]
+
+    assert client.get(f"/api/tasks/{task_id}").json()["skill_name"] is None
+
+
+def test_bundle_does_not_reject_a_path_shaped_skill_name(client):
+    """整组触发时这个字段不当目录名用，就不该拿目录名的规则去拦它。
+
+    这是"必填但无效"最刺眼的一面：调用方为了过校验被迫改一个随后就被丢弃
+    的值，还以为自己填错了东西。
+    """
+    resp = client.post(
+        "/api/evaluations",
+        json={"skill_id": "group/repo:skills", "skill_name": "skills/dev-workflow", "bundle": True},
+    )
+    assert resp.status_code == 202
+
+
+def test_folding_into_a_bundle_clears_the_declared_name(client):
+    """折叠会翻转形态（existing.bundle），名字必须跟着形态走。
+
+    留着上一次单 skill 触发填的名字，那条任务就会以 bundle 形态跑、却带着一个
+    只对单 skill 成立的登记名——正是这个字段该被清掉的场景。
+    """
+    first = client.post("/api/evaluations", json=TRIGGER).json()
+    folded = client.post(
+        "/api/evaluations", json={"skill_id": TRIGGER["skill_id"], "bundle": True}
+    ).json()
+
+    assert folded["deduplicated"] is True
+    assert folded["task_id"] == first["task_id"]
+    task = client.get(f"/api/tasks/{first['task_id']}").json()
+    assert task["bundle"] is True
+    assert task["skill_name"] is None
+
+
 def test_repeat_trigger_folds_into_the_queued_task(client):
     """触发接口天然会被重试，排队中的同一个 skill 要收敛成一条。"""
     first = client.post("/api/evaluations", json=TRIGGER).json()
@@ -410,7 +469,8 @@ def _seed_bundle_task(members: dict[str, str], *, source: str = "local") -> str:
                 id=task_id,
                 source=source,
                 skill_id=BUNDLE_ID,
-                skill_name="dev-workflow",
+                # bundle 任务不记登记名：整组物化不用它命名，存下来只会回显
+                # 一个没参与计算的值。
                 skill_version="v1.2.0",
                 content_hash=CONTEXT,
                 bundle=True,
