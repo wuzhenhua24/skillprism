@@ -18,12 +18,14 @@ from skillprism.domain import ContentSource
 from skillprism.embedding_shim import router as embedding_shim_router
 from skillprism.materialize import MaterializeError, UnsafePathError
 from skillprism.models import EvaluationTask
+from skillprism.repository import skill_ids_with_context
 from skillprism.runner import preflight
 from skillprism.schemas import (
     EvaluationDTO,
     GitLabSubmitRequest,
     SubmitRequest,
     SubmitResponse,
+    TaskDTO,
 )
 
 @asynccontextmanager
@@ -195,30 +197,21 @@ def submit_evaluation(
     return _accept(session, request, default_source())
 
 
-@app.get("/api/tasks/{task_id}")
-def get_task(task_id: str, session: Session = Depends(get_db)) -> dict:
+@app.get("/api/tasks/{task_id}", response_model=TaskDTO)
+def get_task(task_id: str, session: Session = Depends(get_db)) -> TaskDTO:
+    """轮询任务状态。评完之后，``results`` 里是这次产出的每条结论的寻址键。
+
+    **别拿任务上的 hash 直接去查结论。** 单任务时它确实就是结论的
+    ``content_hash``，bundle 任务时它是整组的指纹（回在 ``context_hash``
+    字段上），拿它查什么都是 404。两种形态都用 ``results``，见
+    :class:`~skillprism.schemas.TaskDTO`。
+    """
     task = session.get(EvaluationTask, task_id)
     if task is None:
         raise HTTPException(status_code=404, detail="任务不存在")
-    return {
-        "task_id": task.id,
-        # 任务自己记着来源，不是现读配置：排队期间配置可能已经改了，
-        # 而这条任务属于它入队时的那个来源。
-        "source": task.source,
-        "skill_id": task.skill_id,
-        "skill_name": task.skill_name,
-        "skill_version": task.skill_version,
-        # 入队时为空，worker 下载完内容才填上。
-        "content_hash": task.content_hash,
-        "tier": task.tier,
-        "queue": task.queue,
-        "state": task.state,
-        "attempts": task.attempts,
-        "error": task.error,
-        # 非空即"正在退避、还没到重试时间"。queued 的任务光看 state 分不出
-        # 是在排队还是在重试，这个字段和 error 一起才说得清。
-        "next_attempt_at": task.next_attempt_at,
-    }
+    return service.task_to_dto(
+        session, task, public_base_url=get_settings().public_base_url
+    )
 
 
 #: 报告响应的安全头。报告是 SkillEvaluator 自生成的 HTML，内容源头是用户
@@ -249,15 +242,39 @@ REPORT_SECURITY_HEADERS = {
 }
 
 
-def _no_result_detail(content_hash: str | None) -> str:
-    """带了 content_hash 却查不到，与"这个 skill 从没评过"是两回事。
+#: 404 文案里最多点几个成员的名字。全列出来（一组可到 64 个）会把错误信息
+#: 撑成一屏，说明问题只需要几个例子加一个总数。
+_HINT_SAMPLE = 3
 
-    前者多半是调用方把 hash 记串了或内容还没评完，后者才该去看有没有触发。
-    文案分开，免得对接时两种情况都往"没触发"上查。
+
+def _no_result_detail(
+    session: Session, source: ContentSource, content_hash: str | None
+) -> str:
+    """查不到结论时说清是哪一种查不到。三种情况要分开：
+
+    1. 没带 hash：这个 skill 从没评过，该去看有没有触发。
+    2. 带的 hash 其实是某一组的 ``context_hash``：**这是 bundle 对接时最容易
+       犯的错**——任务行上只有整组指纹时，调用方顺手就把它当结论的寻址键传
+       了过来。不点破的话，症状是"任务显示成功、查结论永远 404"，而中间
+       没有任何一步报错。
+    3. 带的 hash 谁也不认识：记串了，或者内容还没评完。
+
+    第 2 种的判据是库里真有结论把这个值当 ``context_hash``，不是猜的。
     """
-    if content_hash:
-        return f"该 skill 没有 content_hash={content_hash} 的评测结果"
-    return "该 skill 尚无评测结果"
+    if not content_hash:
+        return "该 skill 尚无评测结果"
+
+    members = skill_ids_with_context(session, source, content_hash)
+    if members:
+        shown = "、".join(members[:_HINT_SAMPLE])
+        more = f" 等 {len(members)} 条" if len(members) > _HINT_SAMPLE else ""
+        return (
+            f"content_hash={content_hash} 是一组耦合 skill 的整组指纹，也就是成员"
+            "结论里的 context_hash，它不是任何一条结论的寻址键。这一组的成员是 "
+            f"{shown}{more}，各有自己的 content_hash——用 GET /api/tasks/"
+            "{task_id} 返回的 results 取，别拿任务上的 hash 直接查"
+        )
+    return f"该 skill 没有 content_hash={content_hash} 的评测结果"
 
 
 @app.get("/api/skills/{skill_id:path}/evaluation", response_model=EvaluationDTO)
@@ -273,15 +290,18 @@ def get_evaluation(
     两种都启用时必须带——``skill_id`` 只在一个来源内部唯一，省了就可能取到
     另一个接入下同名的那条。
     """
+    kind = query_source(source)
     dto = service.get_evaluation(
         session,
-        query_source(source),
+        kind,
         skill_id,
         content_hash=content_hash,
         public_base_url=get_settings().public_base_url,
     )
     if dto is None:
-        raise HTTPException(status_code=404, detail=_no_result_detail(content_hash))
+        raise HTTPException(
+            status_code=404, detail=_no_result_detail(session, kind, content_hash)
+        )
     return dto
 
 
@@ -302,11 +322,10 @@ def get_report(
     ``source`` 与 ``content_hash`` 都和 ``/evaluation`` 同义，两边必须一起带：
     只在一边带，拿到的结论和报告可能来自不同版本、甚至不同接入。
     """
-    row = service.lookup_result(
-        session, query_source(source), skill_id, content_hash=content_hash
-    )
+    kind = query_source(source)
+    row = service.lookup_result(session, kind, skill_id, content_hash=content_hash)
     path = service.report_path(row.report_html_uri) if row else None
     if path is None:
-        detail = "报告不存在" if row else _no_result_detail(content_hash)
+        detail = "报告不存在" if row else _no_result_detail(session, kind, content_hash)
         raise HTTPException(status_code=404, detail=detail)
     return FileResponse(path, media_type="text/html", headers=REPORT_SECURITY_HEADERS)

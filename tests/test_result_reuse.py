@@ -220,3 +220,60 @@ def test_clone_carries_the_context(factory):
             skill_id="group/repo:skills/b", skill_version="v2",
         )
         assert cloned.context_hash == BUNDLE
+
+
+def test_clone_refreshes_a_verdict_that_is_already_there(factory):
+    """目标身份上已经有一条时，克隆是覆盖，不是硬插、也不是跳过。
+
+    这种局面很平常：同样的字节挂在两个身份下（两个资源 ID，或同一个 ID 的
+    两个来源），另一个身份评得更晚。复用按内容找"最新的一条"，于是命中的
+    是别人那条，而本次身份自己也有一条。
+
+    硬插撞唯一键——异常被 worker 的兜底吃成"处理异常"，任务重试到失败，
+    错误信息里看不出成因。跳过则把一条按当前判据已经不成立的旧结论留在
+    那儿（它没被复用判据选中，正说明这一点）。
+    """
+    with factory() as session:
+        stale = _seed(
+            session,
+            skill_id="42",
+            policy_file_hash="sha256:policy-v0",
+            evaluated_at=datetime(2026, 9, 1, tzinfo=UTC),
+        )
+        stale.score = 10.0
+        origin = _seed(
+            session,
+            skill_id="7",
+            evaluated_at=datetime(2026, 9, 5, tzinfo=UTC),
+        )
+        session.flush()
+
+        cloned = clone_result(
+            session, origin, source=ContentSource.ZIP, skill_id="42", skill_version="v2"
+        )
+        session.flush()
+
+        rows = (
+            session.query(EvaluationResult)
+            .filter_by(source=str(ContentSource.ZIP), skill_id="42")
+            .all()
+        )
+        assert len(rows) == 1, "同一身份同一内容只能有一条"
+        assert rows[0].id == cloned.id
+        assert rows[0].score == origin.score
+        # 版本标签跟着本次触发走，和 save_result 一样。
+        assert rows[0].skill_version == "v2"
+
+
+def test_clone_onto_itself_leaves_the_row_alone(factory):
+    """origin 自己就挂在目标身份上时不能"先删后插"——那一下会把 origin 删掉。"""
+    with factory() as session:
+        origin = _seed(session, skill_id="42")
+
+        same = clone_result(
+            session, origin, source=ContentSource.ZIP, skill_id="42", skill_version="v1"
+        )
+        session.flush()
+
+        assert same.id == origin.id
+        assert session.get(EvaluationResult, origin.id) is not None

@@ -515,9 +515,39 @@ GET /api/skills/{skill_id}/evaluation?content_hash=<hash>
 GET /api/skills/{skill_id}/report?content_hash=<hash>
 ```
 
-拿 hash 的路径：提交返回 `task_id` → 轮 `GET /api/tasks/{task_id}`，worker
-下载完内容就会把 `content_hash` 填上 → 管理系统把它和这次提交存在一起 →
-详情页用它查。
+拿 hash 的路径：提交返回 `task_id` → 轮 `GET /api/tasks/{task_id}` → 任务评完后
+`results` 里是这次产出的**每条**结论的寻址键 → 管理系统把它们和这次提交存在
+一起 → 详情页用它们查。
+
+```json
+{
+  "task_id": "5f0c…", "source": "gitlab", "state": "done", "bundle": true,
+  "content_hash": null,
+  "context_hash": "sha256:d4ac66…",
+  "results": [
+    {"skill_id": "group/repo:skills/code-review",
+     "content_hash": "sha256:8f3a0b…", "status": "passed", "report_url": "…"},
+    {"skill_id": "group/repo:skills/test-gen",
+     "content_hash": "sha256:1c77e2…", "status": "failed", "report_url": "…"}
+  ]
+}
+```
+
+**别拿任务上的 hash 直接去查结论。** 单任务时它确实就是结论的 `content_hash`；
+bundle 任务时任务行上存的是**整组内容**的指纹，它物化后原样成为每个成员结论的
+`context_hash`，不是任何一条结论的 `content_hash`——拿它查什么都是 404。所以
+任务 DTO 按形态把它放到对的字段上（bundle 时 `content_hash` 为 null、
+`context_hash` 有值），成员各自的寻址键只走 `results`。
+
+一词之差，而整条路上没有任何一步报错：提交 202、任务 done、查询 404。所以
+查询侧也把话挑明——拿组指纹当 `content_hash` 传时，404 的 detail 会说明它是
+`context_hash` 并点出几个成员的 `skill_id`。
+
+`results` 是按 (来源, `context_hash`, `<bundle_id>/` 前缀) 反查出来的，结果表
+**没有** `task_id` 列。这是有意的：结论只取决于内容、评测器和策略，会被后来的
+任务复用，全部命中缓存的 bundle 任务一行新记录都不写——那种情况下 `task_id`
+只会指向更早的某个任务，比没有更误导。单任务的 `results` 里就一条，两种形态
+一个查法。
 
 **不带 hash 时退回"最近评完的那条"，这在 GitLab 接入下多半不是你要的。**
 zip 接入每次上传换一个资源 ID，一个 `skill_id` 基本只有一条结论，取最近的
@@ -632,6 +662,10 @@ script），这套 CSP 不影响它渲染——已在浏览器里实跑验证，
 
 管理系统因此不需要第二套查询方式。bundle 的 ID 本身不挂结论——它不是一个 skill。
 
+**成员的 `content_hash` 从任务接口的 `results` 里拿**，别自己拼 ID 再猜 hash，
+更别拿任务上那个组指纹去查（上一节讲了为什么它查不到东西）。一个成员评失败时
+它不在 `results` 里，原因在任务的 `error` 里——不会给一条占位结论。
+
 **底层是 SkillEvaluator 的 catalog 模式。** 对着一个"自身没有 `SKILL.md`、
 但含 `*/SKILL.md`"的目录，它自动逐个跑完整 Tier 1，每个成员一份独立报告；
 成员的兄弟目录留在盘上，跨 skill 链接因此能解析。不需要额外开关，我们只是
@@ -647,8 +681,8 @@ B 的字节没变但结论可能变（B 引用 A 的文件，A 改名或删了 B
 这一条错了不会报警，只会给出一个看起来完全正常的过期结论，所以由
 `tests/test_result_reuse.py` 单独钉住。
 
-**上限**：一组最多 32 个成员、2048 个文件、128MB；单文件上限仍是 4MB
-（一个文件多大和一组里有几个 skill 无关）。
+**上限**：一组最多 64 个成员（`SKILLPRISM_MAX_BUNDLE_MEMBERS` 可调）、2048 个
+文件、128MB；单文件上限仍是 4MB（一个文件多大和一组里有几个 skill 无关）。
 
 **没有做的：让"调用"本身可见。** SKILL.md 的 frontmatter 里没有依赖字段
 （上游 `models/skill.py` 只有 name/description/license/compatibility/metadata/

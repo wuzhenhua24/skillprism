@@ -22,6 +22,7 @@ from skillprism.content import (
     SkillContentSource,
     SkillNotFoundError,
     build_content_sources,
+    member_skill_id,
 )
 from skillprism.db import SCHEMA_NOT_READY_HINT, schema_is_ready, session_scope
 from skillprism.domain import ContentSource, EvaluationStatus
@@ -135,8 +136,14 @@ def process_task(
             policy_file_hash=policy_hash,
         )
         if reusable is not None:
-            if reusable.skill_id != task.skill_id:
-                # 别的资源 ID 评过同样的内容，挂一份到本次的 ID 上。
+            if reusable.skill_id != task.skill_id or reusable.source != str(source):
+                # 别的身份评过同样的内容，挂一份到本次的身份上。
+                #
+                # 来源也要比：复用刻意跨来源（见 find_reusable_result），而
+                # 两边的 skill_id 是两个命名空间，同一个字符串在 zip 那边是
+                # 资源 ID、在 GitLab 这边是数字项目 ID。只比 skill_id 的话，
+                # 这种撞名会让本次触发一条结论都不落库——任务显示成功，
+                # 按本次的 source 查却是 404。bundle 那条路径一直是这么比的。
                 clone_result(
                     session,
                     reusable,
@@ -201,16 +208,6 @@ def process_task(
         return dto.status
     finally:
         cleanup(work_dir)
-
-
-def _member_skill_id(bundle_skill_id: str, member: str) -> str:
-    """一个成员对外的 skill_id。
-
-    ``group/repo:skills`` + ``code-review`` → ``group/repo:skills/code-review``，
-    正是这个 skill 单独提交时会用的那个 ID。管理系统因此不需要第二套查询
-    方式：查一个成员的结论和查任何别的 skill 完全一样。
-    """
-    return f"{bundle_skill_id.rstrip('/')}/{member}"
 
 
 def _process_bundle(
@@ -278,7 +275,7 @@ def _process_bundle(
 
     if len(reusable) == len(bundle.members) and bundle.members:
         for member, row in reusable.items():
-            member_id = _member_skill_id(task.skill_id, member)
+            member_id = member_skill_id(task.skill_id, member)
             if row.skill_id != member_id or row.source != str(source):
                 clone_result(
                     session,
@@ -309,7 +306,7 @@ def _process_bundle(
     errors: list[str] = []
     for member in bundle.members:
         member_outcome = outcome.members[member]
-        member_id = _member_skill_id(task.skill_id, member)
+        member_id = member_skill_id(task.skill_id, member)
         dto = to_dto(
             skill_id=member_id,
             skill_version=task.skill_version,

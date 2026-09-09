@@ -7,6 +7,7 @@ import uuid
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from skillprism.content import member_skill_id
 from skillprism.domain import ContentSource, EvaluationStatus, Severity, Tier
 from skillprism.models import EvaluationDetail, EvaluationResult
 from skillprism.schemas import (
@@ -44,6 +45,68 @@ def latest_result(
         .limit(1)
     )
     return session.execute(stmt).scalar_one_or_none()
+
+
+def bundle_member_results(
+    session: Session,
+    source: ContentSource,
+    bundle_skill_id: str,
+    context_hash: str,
+) -> list[EvaluationResult]:
+    """一次 bundle 评测产出的那几条成员结论。
+
+    关联键是 ``(source, context_hash, skill_id 前缀)``，**不是一列 task_id**。
+    结果表刻意不记任务：结论只取决于内容、评测器和策略，同一条结论会被后来
+    的任务复用（:func:`find_reusable_result`），全命中的 bundle 任务一行新记录
+    都不写。那种情况下 task_id 列只会指向更早的某个任务，比没有更误导。
+
+    三个条件缺一不可：
+
+    - ``context_hash``：整组的指纹。它把"这一组内容"评出来的结论和同一批
+      skill 在别的组合下评出来的结论分开——后者的成员 ``skill_id`` 可能完全
+      一样，只有上下文不同。
+    - ``skill_id`` 前缀：两组内容恰好一模一样时 ``context_hash`` 会相同，
+      但它们挂在各自的 bundle ID 下，是两次触发的两批结论。
+    - ``source``：``skill_id`` 只在一个来源内部唯一，理由同
+      :func:`find_result`。
+
+    按 ``skill_id`` 排序，好让轮询接口每次返回的顺序稳定。
+    """
+    # 空成员名即成员 ID 的公共前缀，且和落库时走同一套归一化（末尾斜杠）。
+    prefix = member_skill_id(bundle_skill_id, "")
+    stmt = (
+        select(EvaluationResult)
+        .where(
+            EvaluationResult.source == str(source),
+            EvaluationResult.context_hash == context_hash,
+            # autoescape：skill_id 里出现 ``%`` 或 ``_`` 时它们是字面量，
+            # 不转义的话前缀会变成通配，匹到别的 bundle 的成员。
+            EvaluationResult.skill_id.startswith(prefix, autoescape=True),
+        )
+        .order_by(EvaluationResult.skill_id)
+    )
+    return list(session.execute(stmt).scalars())
+
+
+def skill_ids_with_context(
+    session: Session, source: ContentSource, context_hash: str
+) -> list[str]:
+    """哪些结论把这个值当作 ``context_hash``。
+
+    只服务于一处：查询侧拿到一个查不到结论的 ``content_hash`` 时，判断它
+    是不是其实是某一组的整组指纹。是的话 404 就能说出"你拿的是组指纹"，
+    而不是让人从"没触发"一路查起——这个误传参正是 bundle 任务只暴露组级
+    hash 时最容易犯的错。
+    """
+    stmt = (
+        select(EvaluationResult.skill_id)
+        .where(
+            EvaluationResult.source == str(source),
+            EvaluationResult.context_hash == context_hash,
+        )
+        .order_by(EvaluationResult.skill_id)
+    )
+    return list(session.execute(stmt).scalars())
 
 
 def find_reusable_result(
@@ -124,7 +187,29 @@ def clone_result(
     ``source`` 取的是**本次任务**的来源，不是 ``origin`` 的：跨来源复用是
     允许的（见 :func:`find_reusable_result`），但克隆出来的这条要挂在本次
     触发的命名空间下，否则它在自己的来源里查不到。
+
+    **目标身份上已经有结论时先删后插**，和 :func:`save_result` 同语义。两点
+    理由：
+
+    - 不这么做就是往唯一键上硬插。复用是按内容找"最新的一条"，它未必属于
+      本次的身份——而本次身份**同时**已经有一条，是完全可能的（同样的字节
+      挂在两个 skill_id 或两个来源下，另一个评得更晚）。撞键抛出去会被
+      worker 的兜底捕获成"处理异常"，任务重试到失败，错误信息还看不出成因。
+    - 跳过也不对。既有的那条可能是旧策略、旧评测器下评的——它没被
+      :func:`find_reusable_result` 选中，正说明它按当前判据已经不成立了。
+      留着它等于"调完策略对存量 skill 不生效"。origin 是按当前评测器与策略
+      筛出来的，覆盖是对的方向。
+
+    origin 自己就挂在目标身份上时直接返回它，不做删了再插的空转——那一下
+    会把 origin 删掉。worker 的判据不会走到这里，但这个函数不该依赖调用方。
     """
+    existing = find_result(session, source, skill_id, origin.content_hash)
+    if existing is not None:
+        if existing.id == origin.id:
+            return origin
+        session.delete(existing)
+        session.flush()
+
     row = EvaluationResult(
         id=str(uuid.uuid4()),
         source=str(source),

@@ -13,15 +13,22 @@ from sqlalchemy.orm import Session
 
 from skillprism import queue as task_queue
 from skillprism.content import join_skill_id, validate_ref
-from skillprism.domain import ContentSource, Tier
+from skillprism.domain import ContentSource, EvaluationStatus, Tier
 from skillprism.materialize import MaterializeError, safe_relative_path
-from skillprism.models import EvaluationResult
-from skillprism.repository import find_result, latest_result, result_to_dto
+from skillprism.models import EvaluationResult, EvaluationTask
+from skillprism.repository import (
+    bundle_member_results,
+    find_result,
+    latest_result,
+    result_to_dto,
+)
 from skillprism.schemas import (
     EvaluationDTO,
     GitLabSubmitRequest,
     SubmitRequest,
     SubmitResponse,
+    TaskDTO,
+    TaskResultRef,
 )
 
 
@@ -205,6 +212,86 @@ def get_evaluation(
     if row is None:
         return None
     return result_to_dto(row, report_url=report_url_for(row, public_base_url))
+
+
+def task_results(
+    session: Session, task: EvaluationTask, *, public_base_url: str = ""
+) -> list[TaskResultRef]:
+    """这条任务已经落库的结论，连同各自的寻址键。
+
+    两种形态查法不同，因为任务行上那个 hash 的含义不同：
+
+    - 单任务：``task.content_hash`` 就是结论的寻址键，直接精确取那一条。
+    - bundle：它是**整组**的指纹，即每条成员结论的 ``context_hash``。成员
+      按 (来源, 上下文, ``<bundle_id>/`` 前缀) 反查，见
+      :func:`repository.bundle_member_results`。
+
+    结果表不记 task_id，所以这里是**按内容反查**而不是按外键取。这不是将就：
+    一条结论会被后来的任务复用，全命中的 bundle 任务一行新记录都不写，那时
+    外键只会指向更早的某个任务。反查给出的是"这次任务的内容当前对应哪些
+    结论"，那正是调用方要问的。
+
+    没跑完（``content_hash`` 还没填）就是空列表。bundle 里个别成员评失败时
+    这里少几条——失败原因在 ``task.error`` 里，不在这里编一条占位结论。
+    """
+    if not task.content_hash:
+        return []
+    try:
+        source = ContentSource(task.source)
+    except ValueError:
+        # 库里存了个无法识别的来源。诊断接口不该因此 500：任务本身照常回显，
+        # 结论查不了就是查不了（worker 也会让这种任务带着原因作废）。
+        return []
+
+    if task.bundle:
+        rows = bundle_member_results(session, source, task.skill_id, task.content_hash)
+    else:
+        row = find_result(session, source, task.skill_id, task.content_hash)
+        rows = [row] if row is not None else []
+
+    return [
+        TaskResultRef(
+            skill_id=row.skill_id,
+            content_hash=row.content_hash,
+            status=EvaluationStatus(row.status),
+            report_url=report_url_for(row, public_base_url),
+        )
+        for row in rows
+    ]
+
+
+def task_to_dto(
+    session: Session, task: EvaluationTask, *, public_base_url: str = ""
+) -> TaskDTO:
+    """把任务行翻成对外的任务状态。
+
+    这里做的关键一件事是**把任务行上那一列 hash 按形态放到对的字段上**：
+    bundle 任务存的是整组指纹，它是成员结论的 ``context_hash``，不是任何一
+    条结论的 ``content_hash``。落库时两者共用一列（任务确实只有一个"我取到
+    的内容的指纹"），但对外必须分开——一词之差，调用方拿着它查一辈子都是
+    404，而且中间没有任何一步报错。
+    """
+    is_bundle = bool(task.bundle)
+    return TaskDTO(
+        task_id=task.id,
+        # 任务自己记着来源，不是现读配置：排队期间配置可能已经改了，
+        # 而这条任务属于它入队时的那个来源。
+        source=task.source,
+        skill_id=task.skill_id,
+        skill_name=task.skill_name,
+        skill_version=task.skill_version,
+        bundle=is_bundle,
+        # 入队时为空，worker 下载完内容才填上。
+        content_hash=None if is_bundle else task.content_hash,
+        context_hash=task.content_hash if is_bundle else None,
+        tier=task.tier,
+        queue=task.queue,
+        state=task.state,
+        attempts=task.attempts,
+        error=task.error,
+        next_attempt_at=task.next_attempt_at,
+        results=task_results(session, task, public_base_url=public_base_url),
+    )
 
 
 def report_path(uri: str | None) -> Path | None:

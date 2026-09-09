@@ -23,9 +23,10 @@ from skillprism.config import get_settings, reset_settings
 from skillprism.content import LocalDirectorySource
 from skillprism.db import init_db, reset_engine, session_scope
 from skillprism.domain import EvaluationStatus
+from skillprism.models import EvaluationTask
 from skillprism.schemas import SubmitRequest
 from skillprism.domain import ContentSource
-from skillprism.service import get_evaluation, submit
+from skillprism.service import get_evaluation, submit, task_to_dto
 from skillprism.storage import LocalReportStorage
 from skillprism.worker import run_once
 
@@ -217,3 +218,35 @@ def test_bundle_context_is_not_reused_across_shapes(env):
     assert in_bundle.context_hash is not None
     assert any("../test-gen/SKILL.md" in m for m in _problems(solo, "integrity"))
     assert not any("../test-gen/SKILL.md" in m for m in _problems(in_bundle, "integrity"))
+
+
+@needs_cli
+@needs_scanners
+def test_the_task_hands_back_keys_that_actually_resolve(env):
+    """真跑一遍之后，只靠任务接口就能走到每一条结论。
+
+    调用方的流程是 提交 → 轮任务 → 拿任务上的 hash 查结论。bundle 上任务行
+    记的是**整组**的指纹，它是成员结论的 context_hash、不是任何一条结论的
+    寻址键——这条路于是在最后一步静默断掉：提交 202、任务 done、查询 404，
+    中间没有一步报错。所以成员各自的寻址键必须由任务接口交出来，而且交出来
+    的键得真的查得到。
+    """
+    _run(env, SubmitRequest(skill_id=BUNDLE_ID, skill_name=BUNDLE_ID, bundle=True))
+
+    with session_scope() as db:
+        task = db.query(EvaluationTask).one()
+        dto = task_to_dto(db, task)
+
+        assert dto.bundle is True
+        # 组指纹只以 context_hash 的名义出现，不冒充 content_hash。
+        assert dto.content_hash is None
+        assert dto.context_hash == task.content_hash
+        assert [r.skill_id for r in dto.results] == [f"{BUNDLE_ID}/{m}" for m in MEMBERS]
+
+        for ref in dto.results:
+            assert ref.content_hash != dto.context_hash
+            got = get_evaluation(
+                db, ContentSource.LOCAL, ref.skill_id, content_hash=ref.content_hash
+            )
+            assert got is not None, f"任务交回的键查不到结论：{ref.skill_id}"
+            assert got.context_hash == dto.context_hash

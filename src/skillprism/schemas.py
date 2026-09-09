@@ -97,6 +97,73 @@ class EvaluationDTO(BaseModel):
     error: str | None = None
 
 
+class TaskResultRef(BaseModel):
+    """任务产出的一条结论的**寻址键**。
+
+    这三个值（连同任务行上的 ``source``）直接就是两个查询端点的参数：
+
+        GET /api/skills/{skill_id}/evaluation?source=…&content_hash=…
+        GET /api/skills/{skill_id}/report?source=…&content_hash=…
+
+    存在的理由是 bundle：一次提交产出几十条结论，它们各自的 ``content_hash``
+    ——查结论和报告真正的钥匙——在任务侧原本没有任何出口，而任务行上那个
+    hash 是**整组**的指纹，拿它去查一条都查不到。没有这个列表，调用方只能
+    靠"知道内情"去拼 ``<bundle_id>/<成员>``，再挨个猜 hash。
+
+    单任务也照样给（列表里就一条）：两种形态一个查法，调用方不需要为
+    bundle 写第二条代码路径。
+    """
+
+    skill_id: str
+    content_hash: str
+    status: EvaluationStatus
+    #: 同 :attr:`EvaluationDTO.report_url`：没配公开地址或这条结论没有报告
+    #: 时为 null，不回落到内部存储地址。
+    report_url: str | None = None
+
+
+class TaskDTO(BaseModel):
+    """任务状态。管理系统轮询这个接口等评测完成。
+
+    两个 hash 字段分开，是因为它们**不是一个东西**，而 bundle 任务上只给
+    前者会把调用方直接送进死路：
+
+    - ``content_hash``：这条任务评的那份内容的指纹，也是结论的寻址键。
+      bundle 任务为 null——整组的指纹不是任何一条结论的 ``content_hash``，
+      给了就是给一个查什么都 404 的值。
+    - ``context_hash``：整组内容的指纹，单任务为 null。它是每条成员结论的
+      ``context_hash``（同名同义，见 :attr:`EvaluationDTO.context_hash`），
+      拿来对账可以，拿来查结论不行。
+
+    要查结论看 :attr:`results`，别自己拼。
+    """
+
+    task_id: str
+    #: 内容来源，也是查询时的 ``?source=``。用 str 而不是 ContentSource：
+    #: 库里出现无法识别的取值时（配置回滚之类），这个诊断接口更该照实回
+    #: 显那个值，而不是 500——worker 那边也是照实报错再让任务作废。
+    source: str
+    skill_id: str
+    skill_name: str | None = None
+    skill_version: str | None = None
+    #: 这次评的是不是一组耦合 skill。必须暴露：上面两个 hash 字段的含义由
+    #: 它决定，而调用方不该被要求记着自己当初提交的是什么。
+    bundle: bool = False
+    content_hash: str | None = None
+    context_hash: str | None = None
+    tier: str
+    queue: str
+    state: str
+    attempts: int = 0
+    error: str | None = None
+    #: 非空即"正在退避、还没到重试时间"。queued 的任务光看 ``state`` 分不出
+    #: 是在排队还是在重试，这个字段和 ``error`` 一起才说得清。
+    next_attempt_at: datetime | None = None
+    #: 这条任务已经落库的结论。没跑完就是空的；bundle 部分成员失败时，
+    #: 这里是**已经评出来的那几条**，失败的原因在 ``error`` 里。
+    results: list[TaskResultRef] = Field(default_factory=list)
+
+
 class SubmitRequest(BaseModel):
     """按 zip 下载接口触发评测（``POST /api/evaluations/zip``）。
 

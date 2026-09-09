@@ -41,7 +41,14 @@ class EvaluationTask(Base):
     #: 不能拿包里的目录名或 frontmatter 回填——那样这条检查恒真，等于废掉。
     skill_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     skill_version: Mapped[str | None] = mapped_column(String(128), nullable=True)
-    #: 入队时为空：内容由 worker 下载，此刻还不知道 hash。
+    #: worker 实际取到的那份内容的指纹。入队时为空：内容由 worker 下载，
+    #: 此刻还不知道 hash。
+    #:
+    #: **bundle 任务上它的语义变了：**存的是整组内容的指纹，物化后原样成为
+    #: 每个成员结论的 ``context_hash``，而不是任何一条结论的 ``content_hash``。
+    #: 一列装两种含义是因为任务确实只有一个"我取到的内容"，但对外不能这么给
+    #: ——:class:`~skillprism.schemas.TaskDTO` 按 ``bundle`` 把它放到对的字段
+    #: 上，成员各自的寻址键走 ``results``。
     content_hash: Mapped[str | None] = mapped_column(String(80), nullable=True, index=True)
 
     #: tier 与 queue 是 Tier 2/3 的扩展位，M1 恒为 tier1。

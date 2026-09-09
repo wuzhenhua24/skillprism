@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime
+from pathlib import Path
 
 import pytest
 from sqlalchemy import create_engine
@@ -19,8 +20,10 @@ from skillprism.config import get_settings, reset_settings
 from skillprism.content import SkillNotFoundError
 from skillprism.db import init_db, reset_engine, session_scope
 from skillprism.domain import ContentSource, EvaluationStatus, TaskState, Tier
+from skillprism.materialize import SkillFile, compute_content_hash
 from skillprism.models import Base, EvaluationTask
 from skillprism.queue import enqueue, find_queued
+from skillprism.runner import policy_file_hash
 from skillprism.repository import clone_result, find_reusable_result, find_result, save_result
 from skillprism.schemas import EvaluationDTO, SubmitRequest
 from skillprism.service import lookup_result, submit
@@ -157,6 +160,12 @@ def env(tmp_path, monkeypatch, db_url):
     monkeypatch.setenv("SKILLPRISM_REPORT_ROOT", str(tmp_path / "reports"))
     monkeypatch.setenv("SKILLPRISM_WORK_ROOT", str(tmp_path / "work"))
     monkeypatch.setenv("SKILLPRISM_REQUIRE_SCANNERS", "false")
+    # 复用判据要拿策略文件的指纹，读不到就一律不复用（见 runner.policy_file_hash），
+    # 那样下面那条缓存命中的用例根本走不到被测的分支。
+    monkeypatch.setenv(
+        "SKILLPRISM_POLICY_FILE",
+        str(Path(__file__).resolve().parent.parent / "profiles" / "internal.yaml"),
+    )
     reset_settings()
     reset_engine()
     settings = get_settings()
@@ -242,3 +251,97 @@ def test_worker_refuses_a_task_with_an_unreadable_source(env):
         task = db.query(EvaluationTask).one()
         assert task.state == str(TaskState.FAILED)
         assert "svn" in task.error
+
+
+class FixedSource:
+    """总是给出同一份内容的来源。"""
+
+    def __init__(self, files) -> None:
+        self.files = files
+
+    def fetch(self, skill_id, version=None):
+        return list(self.files)
+
+    def fetch_bundle(self, skill_id, version=None):
+        raise AssertionError("这条任务不是 bundle")
+
+
+def test_a_cross_source_cache_hit_still_lands_a_verdict_in_this_source(env):
+    """跨来源命中缓存时，必须往**本次触发的来源**下挂一条，否则等于没评。
+
+    复用刻意不看 source（同样的字节评出同样的结论），但身份分来源。撞名的
+    ID——zip 的资源 ID 与 GitLab 的数字项目 ID——命中对方那条结论时，只比
+    skill_id 就不会克隆：任务显示成功，按本次的 source 查却是 404，任务接口
+    的 results 也是空的。症状和 bundle 那个坑一模一样，成因不同。
+    """
+    files = [SkillFile(path="SKILL.md", data=b"---\nname: demo\n---\n")]
+    content_hash = compute_content_hash(files)
+    policy = policy_file_hash(env)
+    assert policy, "策略指纹为空的话复用根本不会发生，这条用例就没测到东西"
+
+    with session_scope() as db:
+        save_result(
+            db,
+            _dto(content_hash=content_hash),
+            source=ContentSource.ZIP,
+            policy_file_hash=policy,
+        )
+        enqueue(db, source=ContentSource.GITLAB, skill_id=COLLIDING_ID, skill_name="demo")
+
+    assert run_once(
+        settings=env,
+        content_sources={ContentSource.GITLAB: FixedSource(files)},
+        storage=LocalReportStorage(env.report_root),
+    )
+
+    with session_scope() as db:
+        task = db.query(EvaluationTask).one()
+        assert task.state == str(TaskState.DONE)
+        assert task.content_hash == content_hash
+        assert (
+            lookup_result(db, ContentSource.GITLAB, COLLIDING_ID) is not None
+        ), "命中的是 zip 那条结论，本次 GitLab 触发一条都没落库"
+
+
+def test_a_cross_source_cache_hit_when_this_source_already_has_one(env):
+    """本次身份上已经有结论、而命中的是另一个来源那条时，要覆盖而不是崩。
+
+    撞名的 ID 两边都评过、GitLab 那条更新，再触发一次 zip 就是这个局面：
+    复用按内容找最新的一条，找到的是 GitLab 那条，而 zip 自己也有一条。往
+    唯一键上硬插会被 worker 的兜底吃成"处理异常"，任务重试到失败——而它本该
+    是一次最普通的缓存命中。
+    """
+    files = [SkillFile(path="SKILL.md", data=b"---\nname: demo\n---\n")]
+    content_hash = compute_content_hash(files)
+    policy = policy_file_hash(env)
+
+    with session_scope() as db:
+        older = save_result(
+            db,
+            _dto(content_hash=content_hash, score=10.0),
+            source=ContentSource.ZIP,
+            policy_file_hash=policy,
+        )
+        older.evaluated_at = datetime(2026, 9, 1, tzinfo=UTC)
+        newer = save_result(
+            db,
+            _dto(content_hash=content_hash, score=90.0),
+            source=ContentSource.GITLAB,
+            policy_file_hash=policy,
+        )
+        newer.evaluated_at = datetime(2026, 9, 5, tzinfo=UTC)
+        enqueue(db, source=ContentSource.ZIP, skill_id=COLLIDING_ID, skill_name="demo")
+
+    assert run_once(
+        settings=env,
+        content_sources={ContentSource.ZIP: FixedSource(files)},
+        storage=LocalReportStorage(env.report_root),
+    )
+
+    with session_scope() as db:
+        task = db.query(EvaluationTask).one()
+        assert task.state == str(TaskState.DONE), task.error
+        row = lookup_result(db, ContentSource.ZIP, COLLIDING_ID)
+        assert row is not None
+        # 覆盖成当前判据下有效的那条，而不是留着旧的。
+        assert row.score == 90.0

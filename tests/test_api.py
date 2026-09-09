@@ -379,3 +379,181 @@ def test_healthz_reports_scanner_state(client):
     body = client.get("/healthz").json()
     assert body["status"] in {"ok", "degraded"}
     assert "missing_scanners" in body
+
+
+# ---- 任务接口交回的寻址键 ----
+#
+# 调用方的直觉流程是：提交 → 轮任务 → 拿任务上的 hash 去查结论。单任务时
+# 这条路是通的；bundle 时任务上那个 hash 是**整组**的指纹（每条成员结论的
+# context_hash），拿它查什么都是 404，而且提交、轮询、查询三步全都返回
+# 正常。所以任务接口必须直接把成员各自的寻址键交出来。
+
+BUNDLE_ID = "group/repo:skills"
+CONTEXT = "sha256:whole-group"
+
+
+def _seed_bundle_task(members: dict[str, str], *, source: str = "local") -> str:
+    """一条评完的 bundle 任务，外加它产出的成员结论。
+
+    ``members`` 是 成员名 → 该成员自己的 content_hash；任务行上记的是整组的
+    指纹，正如 worker 落库时那样。
+    """
+    import uuid
+
+    from skillprism.db import session_scope
+    from skillprism.models import EvaluationResult, EvaluationTask
+
+    task_id = str(uuid.uuid4())
+    with session_scope() as session:
+        session.add(
+            EvaluationTask(
+                id=task_id,
+                source=source,
+                skill_id=BUNDLE_ID,
+                skill_name="dev-workflow",
+                skill_version="v1.2.0",
+                content_hash=CONTEXT,
+                bundle=True,
+                state="done",
+            )
+        )
+        for member, content_hash in members.items():
+            session.add(
+                EvaluationResult(
+                    id=str(uuid.uuid4()),
+                    source=source,
+                    skill_id=f"{BUNDLE_ID}/{member}",
+                    content_hash=content_hash,
+                    context_hash=CONTEXT,
+                    status="passed",
+                    severity_counts={},
+                    incomplete_scans=[],
+                )
+            )
+    return task_id
+
+
+def test_a_bundle_task_hands_back_every_member_key(client):
+    """bundle 评完之后，调用方必须能只靠任务接口走到每一条结论。
+
+    成员的 content_hash 原本在任务侧一个出口都没有：既不在任务 DTO 里，也
+    没有按任务列成员的接口。调用方只剩两条"知道内情才能用"的通道——自己拼
+    ``<bundle_id>/<成员>``，再挨个猜 hash。
+    """
+    task_id = _seed_bundle_task({"code-review": "hash-cr", "test-gen": "hash-tg"})
+
+    task = client.get(f"/api/tasks/{task_id}").json()
+
+    assert task["bundle"] is True
+    assert {(r["skill_id"], r["content_hash"]) for r in task["results"]} == {
+        (f"{BUNDLE_ID}/code-review", "hash-cr"),
+        (f"{BUNDLE_ID}/test-gen", "hash-tg"),
+    }
+    # 交回来的键必须真的查得到——这条链路通不通就是本节的全部意义。
+    for ref in task["results"]:
+        got = client.get(
+            f"/api/skills/{ref['skill_id']}/evaluation",
+            params={"source": task["source"], "content_hash": ref["content_hash"]},
+        )
+        assert got.status_code == 200, got.json()
+        assert got.json()["context_hash"] == task["context_hash"]
+
+
+def test_a_bundle_task_does_not_call_the_group_hash_a_content_hash(client):
+    """整组指纹不是任何一条结论的寻址键，就不能挂在 content_hash 这个名字下。
+
+    一词之差正是这个坑的全部成因：字段叫 content_hash，调用方就当它是查
+    结论的那个 hash——查一辈子都是 404，中间没有一步报错。
+    """
+    task_id = _seed_bundle_task({"code-review": "hash-cr"})
+
+    task = client.get(f"/api/tasks/{task_id}").json()
+
+    assert task["content_hash"] is None
+    assert task["context_hash"] == CONTEXT
+    # 与成员结论里的同名字段是同一个值，对账用得上。
+    assert task["results"][0]["content_hash"] == "hash-cr"
+
+
+def test_a_solo_task_addresses_its_one_result_the_same_way(client, public_domain, tmp_path):
+    """单任务也给 results，两种形态一个查法。
+
+    调用方不必为 bundle 写第二条代码路径——那正是当初漏掉成员寻址键时，
+    对方被迫要写的东西。
+    """
+    import uuid
+
+    from skillprism.db import session_scope
+    from skillprism.models import EvaluationTask
+
+    skill_id = "group/repo:skills/log-triage"
+    _seed_two_versions(skill_id, tmp_path / "reports")
+    task_id = str(uuid.uuid4())
+    with session_scope() as session:
+        session.add(
+            EvaluationTask(
+                id=task_id,
+                source="local",
+                skill_id=skill_id,
+                skill_name="log-triage",
+                content_hash="hash-v1",
+                state="done",
+            )
+        )
+
+    task = client.get(f"/api/tasks/{task_id}").json()
+
+    assert task["bundle"] is False
+    # 单任务上这个字段本来就是结论的寻址键，语义不变。
+    assert task["content_hash"] == "hash-v1"
+    assert task["context_hash"] is None
+    assert task["results"] == [
+        {
+            "skill_id": skill_id,
+            "content_hash": "hash-v1",
+            "status": "passed",
+            "report_url": (
+                f"{PUBLIC_BASE_URL}/api/skills/{skill_id}"
+                "/report?source=local&content_hash=hash-v1"
+            ),
+        }
+    ]
+
+
+def test_a_queued_task_has_no_results_yet(client):
+    """还没下载内容就没有 hash，也就没有结论。空列表，不编占位。"""
+    task_id = client.post("/api/evaluations", json=TRIGGER).json()["task_id"]
+
+    task = client.get(f"/api/tasks/{task_id}").json()
+
+    assert task["content_hash"] is None and task["results"] == []
+
+
+def test_the_group_hash_used_as_a_content_hash_says_so(client):
+    """拿组指纹当 content_hash 查时，404 要点破它是什么。
+
+    不点破的话症状是"任务成功、查结论永远 404"，对接时两种情况都会往
+    "是不是没触发"上查——而真正的原因是传参传串了一个词。
+    """
+    _seed_bundle_task({"code-review": "hash-cr", "test-gen": "hash-tg"})
+
+    resp = client.get(
+        f"/api/skills/{BUNDLE_ID}/evaluation", params={"content_hash": CONTEXT}
+    )
+
+    assert resp.status_code == 404
+    detail = resp.json()["detail"]
+    assert "context_hash" in detail
+    assert f"{BUNDLE_ID}/code-review" in detail
+
+
+def test_an_unknown_hash_is_still_just_unknown(client):
+    """认不出的 hash 不能也说成"你拿的是组指纹"——那是猜，会把人带偏。"""
+    _seed_bundle_task({"code-review": "hash-cr"})
+
+    resp = client.get(
+        f"/api/skills/{BUNDLE_ID}/evaluation", params={"content_hash": "sha256:nope"}
+    )
+
+    assert resp.status_code == 404
+    assert "context_hash" not in resp.json()["detail"]

@@ -276,6 +276,21 @@ def join_skill_id(project: str, subdir: str | None) -> str:
     return raw
 
 
+def member_skill_id(bundle_skill_id: str, member: str) -> str:
+    """一组耦合 skill 里，某个成员对外的 ``skill_id``。
+
+    ``group/repo:skills`` + ``code-review`` → ``group/repo:skills/code-review``，
+    正是这个 skill 单独提交时会用的那个 ID。管理系统因此不需要第二套查询
+    方式：查一个成员的结论和查任何别的 skill 完全一样。
+
+    规则放在这里而不是 worker 里，是因为它有**两个**使用者：worker 落库时
+    按它给成员命名，查询侧按它反过来找出"这次 bundle 任务产出了哪几条结论"
+    （见 :func:`skillprism.repository.bundle_member_results`）。两边各写一遍
+    的话，改了一处就会让任务接口漏报成员——漏报不报错，只是列表短了一截。
+    """
+    return f"{bundle_skill_id.rstrip('/')}/{member}"
+
+
 def validate_ref(ref: str) -> str:
     """校验 git ref。写错的 ref 重试多少次都一样，所以当作"不存在"处理。"""
     candidate = ref.strip()
