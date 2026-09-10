@@ -260,6 +260,9 @@ skillevaluator validate <skill 目录> --policy ./profiles/internal.yaml -r cli
 
 用户上传完 skill 后，管理系统调用触发接口；内容由本服务反向去它那里下载。
 
+对接方要照着做的那一份契约在 [docs/api.md](docs/api.md)——端点、字段、错误码、联调
+checklist。这一节讲的是**为什么长成那样**，两份都在时以下面的理由为准。
+
 ### 触发接口
 
 **每种接入一个入口**，请求体各用各的字段：
