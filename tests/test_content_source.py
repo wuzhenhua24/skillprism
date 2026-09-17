@@ -133,6 +133,76 @@ def test_factory_picks_zip_source_when_configured():
     assert isinstance(sources[ContentSource.ZIP], ZipArchiveSource)
 
 
+GATEWAY_HEADERS = "X-Ploto-Direct-Target=lingxi-manager/default"
+
+
+def test_content_headers_reach_the_request_alongside_token(patch_client):
+    """经内部网关调管理系统：网关按路由头转发，漏带就到不了 lingxi-manager。"""
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["headers"] = request.headers
+        return httpx.Response(200, content=make_zip([("SKILL.md", MANIFEST)]))
+
+    patch_client(handler)
+    settings = Settings(
+        content_url_template=TEMPLATE, content_token="t0ken", content_headers=GATEWAY_HEADERS
+    )
+    build_content_sources(settings)[ContentSource.ZIP].fetch("demo")
+
+    assert seen["headers"]["x-ploto-direct-target"] == "lingxi-manager/default"
+    assert seen["headers"]["authorization"] == "Bearer t0ken"
+
+
+def test_content_headers_do_not_leak_to_gitlab(patch_client):
+    """路由头是给管理系统那条链路的，GitLab 是另一个上游。"""
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["headers"] = request.headers
+        return httpx.Response(200, content=gitlab_zip([("SKILL.md", MANIFEST)]))
+
+    patch_client(handler)
+    settings = Settings(
+        content_url_template=TEMPLATE, gitlab_base_url=GITLAB, content_headers=GATEWAY_HEADERS
+    )
+    build_content_sources(settings)[ContentSource.GITLAB].fetch("group/repo")
+
+    assert "x-ploto-direct-target" not in seen["headers"]
+
+
+def test_content_headers_parse_multiple_pairs():
+    settings = Settings(content_headers=f" {GATEWAY_HEADERS} , X-Env=prod ")
+    assert settings.content_header_pairs() == {
+        "X-Ploto-Direct-Target": "lingxi-manager/default",
+        "X-Env": "prod",
+    }
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "X-Ploto-Direct-Target",  # 缺 =
+        "Bad Name=v",  # 头名带空格
+        "X-A=",  # 值为空
+        "X-A=中文",  # httpx 按 ASCII 编码头值，发请求时才会炸
+        "X-A=1,X-A=2",  # 重复的头只会留一个
+        "X-A=1,x-a=2",  # 头名不分大小写
+    ],
+)
+def test_malformed_content_headers_fail_at_startup(value):
+    """写错的头重试多少次都一样，启动时就该报错，而不是让任务退避几轮再终结。"""
+    with pytest.raises(ValidationError, match="SKILLPRISM_CONTENT_HEADERS"):
+        Settings(content_headers=value)
+
+
+def test_content_token_and_authorization_header_are_mutually_exclusive():
+    with pytest.raises(ValidationError, match="Authorization"):
+        Settings(content_token="t0ken", content_headers="authorization=Basic xyz")
+    # 只配其中一个是合法的
+    Settings(content_headers="Authorization=Basic xyz")
+
+
 def test_factory_falls_back_to_local_directory():
     settings = Settings(content_url_template="")
     sources = build_content_sources(settings)

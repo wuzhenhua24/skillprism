@@ -173,6 +173,7 @@ class ZipArchiveSource:
         url_template: str,
         *,
         token: str = "",
+        headers: dict[str, str] | None = None,
         timeout: float = 60.0,
         max_bytes: int = 64 * 1024 * 1024,
         max_bundle_members: int = MAX_BUNDLE_MEMBERS,
@@ -181,6 +182,8 @@ class ZipArchiveSource:
             raise ValueError("url_template 必须包含 {skill_id} 占位符")
         self.url_template = url_template
         self.token = token
+        #: 额外请求头，例如内部网关的路由头。见 Settings.content_headers。
+        self.headers = dict(headers or {})
         self.timeout = timeout
         self.max_bytes = max_bytes
         self.max_bundle_members = max_bundle_members
@@ -190,7 +193,9 @@ class ZipArchiveSource:
         return self.url_template.format(skill_id=quote(skill_id, safe=""))
 
     def _download(self, url: str) -> bytes:
-        headers = {"Authorization": f"Bearer {self.token}"} if self.token else {}
+        headers = dict(self.headers)
+        if self.token:
+            headers["Authorization"] = f"Bearer {self.token}"
         return download_capped(
             url,
             headers=headers,
@@ -462,6 +467,7 @@ def _build_one(settings, kind: ContentSource) -> SkillContentSource:
         return ZipArchiveSource(
             settings.content_url_template,
             token=settings.content_token,
+            headers=settings.content_header_pairs(),
             timeout=settings.content_timeout_seconds,
             max_bytes=settings.max_download_bytes,
             max_bundle_members=settings.max_bundle_members,

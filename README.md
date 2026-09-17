@@ -412,10 +412,18 @@ SkillEvaluator 评不了。**由触发方保证只对 Skills 分类调用**，�
 ```bash
 SKILLPRISM_CONTENT_URL_TEMPLATE=http://<manager>/lingxi-manager/api/resource/{skill_id}/download
 SKILLPRISM_CONTENT_TOKEN=<服务令牌>
+# 经公司内部网关转发时，网关按这个头决定转给谁
+SKILLPRISM_CONTENT_HEADERS=X-Ploto-Direct-Target=lingxi-manager/default
 ```
 
 `{skill_id}` 会被整体 URL 编码后替换——skill_id 形如 `team/name` 时不会
 改变 URL 的路径结构。令牌作为 `Bearer` 发送。
+
+`CONTENT_HEADERS` 是每次下载都额外带上的请求头，`Name=Value` 逗号分隔
+（值里因此不能有逗号），不需要就留空。它只作用于这个下载地址，GitLab 接入
+不带。头名不合法、值为空或非 ASCII、同名出现两次，启动时直接报错——这些
+错误重试多少次都一样，不该变成任务退避几轮后才终结。和 `CONTENT_TOKEN`
+同时配 `Authorization` 也会报错，两者只能留一个。
 
 只有 **worker** 需要能访问管理系统，API 进程不需要。这是刻意的隔离，
 部署时可以据此收紧网络策略。

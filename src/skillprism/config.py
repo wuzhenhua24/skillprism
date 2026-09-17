@@ -4,15 +4,15 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from pydantic import field_validator
+from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from skillprism.materialize import MAX_BUNDLE_FILES, MAX_BUNDLE_MEMBERS
 
 
-def parse_scanner_env(value: str) -> dict[str, str]:
-    """把 ``K=V,K=V`` 解析成字典。格式不对就抛，不做静默忽略。"""
-    pairs: dict[str, str] = {}
+def _parse_pairs(value: str, env_name: str) -> list[tuple[str, str]]:
+    """把 ``K=V,K=V`` 解析成键值对，保留重复项。格式不对就抛，不做静默忽略。"""
+    pairs: list[tuple[str, str]] = []
     for item in value.split(","):
         item = item.strip()
         if not item:
@@ -21,10 +21,41 @@ def parse_scanner_env(value: str) -> dict[str, str]:
         key = key.strip()
         if not sep or not key:
             raise ValueError(
-                f"SKILLPRISM_SCANNER_ENV 的每一项都要形如 K=V（逗号分隔），这一项不合法：{item!r}"
+                f"{env_name} 的每一项都要形如 K=V（逗号分隔），这一项不合法：{item!r}"
             )
-        pairs[key] = val.strip()
+        pairs.append((key, val.strip()))
     return pairs
+
+
+def parse_scanner_env(value: str) -> dict[str, str]:
+    return dict(_parse_pairs(value, "SKILLPRISM_SCANNER_ENV"))
+
+
+def is_header_name(value: str) -> bool:
+    return bool(value) and not any(ord(ch) < 0x21 or ord(ch) > 0x7E or ch == ":" for ch in value)
+
+
+def parse_content_headers(value: str) -> dict[str, str]:
+    """把 ``SKILLPRISM_CONTENT_HEADERS`` 解析成请求头。
+
+    头名不合法、值为空或含控制字符 / 非 ASCII、同名（不分大小写）出现两次，
+    都在这里抛。这些错误到了发请求时才暴露的话，表现是 httpx 抛异常、被收敛
+    成可重试的 ContentFetchError，任务退避几轮之后才终结——而重试多少次都一样。
+    """
+    headers: dict[str, str] = {}
+    seen: set[str] = set()
+    for name, val in _parse_pairs(value, "SKILLPRISM_CONTENT_HEADERS"):
+        if not is_header_name(name):
+            raise ValueError(f"SKILLPRISM_CONTENT_HEADERS 里的请求头名不合法：{name!r}")
+        if name.lower() in seen:
+            raise ValueError(f"SKILLPRISM_CONTENT_HEADERS 里 {name!r} 出现了不止一次")
+        seen.add(name.lower())
+        if not val or any(ord(ch) < 0x20 or ord(ch) > 0x7E for ch in val):
+            raise ValueError(
+                f"SKILLPRISM_CONTENT_HEADERS 里 {name!r} 的值为空或含控制字符 / 非 ASCII：{val!r}"
+            )
+        headers[name] = val
+    return headers
 
 
 class Settings(BaseSettings):
@@ -50,6 +81,15 @@ class Settings(BaseSettings):
     content_url_template: str = ""
     #: 调用管理系统用的令牌，作为 Bearer 发送。
     content_token: str = ""
+    #: 调用管理系统时额外带上的请求头，格式 ``Name=Value``，逗号分隔。
+    #:
+    #: 用于经公司内部网关转发的场景：网关按头决定转给谁，例
+    #: ``X-Ploto-Direct-Target=lingxi-manager/default``。只作用于上面这个
+    #: 下载地址，GitLab 接入不带——那是另一个上游，要不要过网关是两回事。
+    #:
+    #: 值里不能有逗号（逗号是分隔符）。令牌仍然走 CONTENT_TOKEN，两处都给
+    #: Authorization 会在启动时报错。
+    content_headers: str = ""
     content_timeout_seconds: float = 60.0
     #: 下载体积上限。解压前先卡住，避免拉一个超大响应体进内存。
     max_download_bytes: int = 64 * 1024 * 1024
@@ -159,9 +199,27 @@ class Settings(BaseSettings):
     @classmethod
     def _gitlab_token_header_is_a_header_name(cls, value: str) -> str:
         value = value.strip()
-        if not value or any(ord(ch) < 0x21 or ord(ch) > 0x7E or ch == ":" for ch in value):
+        if not is_header_name(value):
             raise ValueError(f"SKILLPRISM_GITLAB_TOKEN_HEADER 不是合法的请求头名：{value!r}")
         return value
+
+    @field_validator("content_headers")
+    @classmethod
+    def _content_headers_are_parseable(cls, value: str) -> str:
+        parse_content_headers(value)
+        return value
+
+    @model_validator(mode="after")
+    def _content_token_and_headers_do_not_both_set_authorization(self) -> Settings:
+        """两处都给 Authorization 时只有一个能生效，哪个赢都是在静默丢配置。"""
+        if self.content_token and any(
+            name.lower() == "authorization" for name in self.content_header_pairs()
+        ):
+            raise ValueError(
+                "SKILLPRISM_CONTENT_TOKEN 与 SKILLPRISM_CONTENT_HEADERS 里的 Authorization "
+                "只能配一个：前者会以 Bearer 发送 Authorization"
+            )
+        return self
 
     @field_validator("max_bundle_members")
     @classmethod
@@ -189,6 +247,9 @@ class Settings(BaseSettings):
 
     def scanner_env_pairs(self) -> dict[str, str]:
         return parse_scanner_env(self.scanner_env)
+
+    def content_header_pairs(self) -> dict[str, str]:
+        return parse_content_headers(self.content_headers)
 
     def backoff_for(self, attempts: int) -> float:
         """第 ``attempts`` 次尝试失败后要等的秒数。"""

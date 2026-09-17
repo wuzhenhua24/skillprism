@@ -183,6 +183,8 @@ SKILLPRISM_PUBLIC_BASE_URL=https://skillprism.internal
 # 内容来源：管理系统的 zip 下载接口（待对方提供后填写）
 SKILLPRISM_CONTENT_URL_TEMPLATE=
 SKILLPRISM_CONTENT_TOKEN=
+# 经公司内部网关调管理系统时带的路由头，Name=Value 逗号分隔。直连就留空
+SKILLPRISM_CONTENT_HEADERS=X-Ploto-Direct-Target=lingxi-manager/default
 SKILLPRISM_CONTENT_TIMEOUT_SECONDS=60
 SKILLPRISM_MAX_DOWNLOAD_BYTES=67108864
 
@@ -587,6 +589,7 @@ worker 写的报告，所以两者必须同机。要真正横向扩展需要先�
 | 连不上数据库 | 连接串、密码或 PG 服务 | `sudo -u skillprism psql "$SKILLPRISM_DATABASE_URL" -c 'select 1'` |
 | 报告接口 404 但评测显示成功 | API 与 worker 不在同一文件系统 | 当前形态要求两者同机 |
 | 下载内容失败 | 区分两类：`SkillNotFoundError`（404 或归档解不出，不重试，直接 `failed`）与 `ContentFetchError`（5xx/网络，退避重试至 `MAX_ATTEMPTS`） | 看 worker 日志里的具体异常；任务的 `error` 字段也会带上它 |
+| 经内部网关调管理系统，**所有** skill 都报"管理系统中不存在该 skill"或都在退避重试 | 网关没收到路由头，请求没被转到 lingxi-manager。网关如果对这种请求回 404，我们会把它当成 skill 不存在、不重试直接终结 | 查 `SKILLPRISM_CONTENT_HEADERS` 是否配了、改完是否重启了 worker。绕开服务手工验证：`curl -sS -o /dev/null -w '%{http_code}\n' -H "X-Ploto-Direct-Target: lingxi-manager/default" -H "Authorization: Bearer $TOKEN" "<模板里的地址，{skill_id} 换成一个已知存在的>"`，应当是 200 |
 | 走 GitLab 源，**所有** skill 都报"取不到内容" | 令牌头名或权限不对。GitLab 对无权限的项目也返回 404（防枚举），而 404 在我们这里是不重试的终结态 | 先验令牌：`curl -H "PRIVATE-TOKEN: $TOKEN" "$BASE/api/v4/projects/<group%2Frepo>"`。PAT / group / project token 用 `PRIVATE-TOKEN`，CI 的 `CI_JOB_TOKEN` 只认 `JOB-TOKEN`，改 `SKILLPRISM_GITLAB_TOKEN_HEADER` |
 | 走 GitLab 源，报"归档里没有声明的子目录" | 归档里确实没有这个子目录：`skill_id` 里的子目录与仓库实际布局对不上 | `skill_id` 形如 `group/repo:skills/foo`，子目录是相对仓库根的路径且必须直接含 `SKILL.md`。子目录**之外**的文件不会导致这条报错——服务端没按 `path` 过滤时（老版 GitLab）我们自己筛 |
 | 走 GitLab 源，报"归档条目数超限"或"总大小超限" | `skill_id` 没带子目录，整个仓库被当成一个 skill | 带上子目录。上限只算落在声明子目录下的条目，同仓其他目录多大都不影响 |
