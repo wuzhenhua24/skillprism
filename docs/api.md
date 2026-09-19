@@ -350,7 +350,7 @@ curl -G http://127.0.0.1:8000/api/skills/2000705/evaluation \
   "grade": "C",
   "severity_counts": {"critical": 0, "high": 0, "medium": 5, "low": 7},
   "evaluator": {
-    "version": "0.2.1",
+    "version": "skillevaluator, version 0.3.0",
     "profile": "external",
     "policy_digest": "sha256:1caeb0bf…",
     "incomplete_scans": []
@@ -404,7 +404,7 @@ curl -G http://127.0.0.1:8000/api/skills/2000705/evaluation \
 | `score` / `grade` | 质量分与等级，上游没给时为 `null` |
 | `severity_counts` | 只包含上游报告里出现的级别，缺的按 0 处理 |
 | `evaluator.version` | 评测器版本。**必须随结果展示**——分数变化时用户第一个要问的就是「是不是评测器变了」 |
-| `evaluator.incomplete_scans` | 非空即安全扫描没跑全，结论不完整 |
+| `evaluator.incomplete_scans` | 非空即安全扫描没跑全，结论不完整。原因见 §9 `incomplete` 那一行 |
 | `tiers.tier1.validators[]` | 按 validator 名分组，不拍平成固定列；上游新增 validator 不需要改契约 |
 | `validators[].errors[]` | 上游只有一句话、没有 severity 的 legacy 问题（**死链走这个通道**）。`passed=false` 而 `findings` 为空时，原因在这里 |
 | `findings[].file_path` | 已归一化成 skill 内部的相对路径，不会暴露我们的临时目录 |
@@ -463,7 +463,7 @@ curl -G http://127.0.0.1:8000/api/skills/2000705/evaluation \
 {
   "status": "ok",
   "skillevaluator": "/var/lib/skillprism/.local/bin/skillevaluator",
-  "version": "skillevaluator, version 0.2.1",
+  "version": "skillevaluator, version 0.3.0",
   "missing_scanners": []
 }
 ```
@@ -485,7 +485,7 @@ curl -G http://127.0.0.1:8000/api/skills/2000705/evaluation \
 | --- | --- | --- |
 | `passed` | 通过 | 合格徽章 |
 | `failed` | 不合格 | 不合格，**不该重试** |
-| `incomplete` | 外部扫描器缺失，安全结论不完整 | **不是通过**，不能发合格徽章 |
+| `incomplete` | 安全扫描没跑全，结论不完整。两种来源：我们这边扫描器缺失（所有 skill 都会这样），或者 skill 包里有扫描器看不了的二进制文件——图片、PDF、字体、压缩包（只有这个 skill 会这样，重评也不会变） | **不是通过**，不能发合格徽章。具体原因在 `tiers.tier1.validators[]` 里 Security Scan 那一项的 `errors[]` |
 | `error` | 评测本身失败，skill 从未被判定 | 展示为「评测失败」，可重试 |
 | `pending` | 占位，尚未评出 | |
 

@@ -104,7 +104,7 @@ sudo -u skillprism sh -c 'curl -LsSf https://astral.sh/uv/install.sh | sh'
 UV=/var/lib/skillprism/.local/bin/uv
 
 sudo -u skillprism $UV tool install --python 3.13 \
-  "skillevaluator[security] @ git+https://github.com/NVIDIA/SkillEvaluator.git"
+  "skillevaluator[security] @ git+https://github.com/NVIDIA/SkillEvaluator.git@v0.3.0"
 
 sudo -u skillprism $UV tool install semgrep
 
@@ -117,10 +117,13 @@ sudo -u skillprism $UV tool install \
 > 就把覆盖标成 `partial`，SkillEvaluator 随即把整个 skillspector 扫描记为
 > incomplete。上游 [#112](https://github.com/NVIDIA/SkillEvaluator/pull/112)
 > 已合并（`ff349e0`），修的是更早那版"报告不可信整份丢弃"的判法——**它不解除
-> 这个 pin**，2.10.0 / 2.11.1 实测仍是 incomplete。skillevaluator 从 main 装，
-> 已经包含 #112，与 v2.9.6 搭配实测正常。
+> 这个 pin**，2.10.0 / 2.11.1 实测仍是 incomplete。v0.3.0 包含 #112，与 v2.9.6
+> 搭配实测正常。
 > 详见 [README](../README.md)
 > 与 [docs/upstream/pr112-comment.md](upstream/pr112-comment.md)。
+>
+> **skillevaluator 只装 tag。** 上游只在发版时改版本号，main 上的提交可能改了
+> 判法却还报旧版本号，结论复用会把旧结论当成同一评测器的结果。
 
 gitleaks 只发布二进制，按架构选：
 
@@ -375,7 +378,7 @@ curl -s http://127.0.0.1:8000/healthz | python3 -m json.tool
 {
   "status": "ok",
   "skillevaluator": "/var/lib/skillprism/.local/bin/skillevaluator",
-  "version": "skillevaluator, version 0.2.1",
+  "version": "skillevaluator, version 0.3.0",
   "missing_scanners": []
 }
 ```
@@ -452,7 +455,24 @@ sudo systemctl restart skillprism-api skillprism-worker
 
 **升级 skillevaluator**——先在非生产环境跑 e2e 测试，尤其确认
 `test_security_scan_completes` 仍然通过；升级后存量 skill 的评分可能整体漂移，
-建议先跑一批做对比。
+建议先跑一批做对比。另外三点：
+
+- **只换 tag**：`uv tool install --force` 后面跟新的 `@vX.Y.Z`，别换成 main。原因见
+  第三节的安装说明。
+- **装完重启 worker。** 评测器版本在 worker 启动时取一次，不重启的话新评测器跑出
+  的结论会记成旧版本号，复用判据就此失准。
+- **版本号一变，存量结论全部不再复用**，每个 skill 下次触发时都会真跑一遍。这是
+  对的，但对账任务如果会一次性重触发全部 skill，要预期一次评测高峰。
+
+先确认机器上实际装的是哪个版本——从 git 装的会记下 commit：
+
+```bash
+cat /var/lib/skillprism/.local/share/uv/tools/skillevaluator/lib/python3.13/site-packages/skillevaluator-*.dist-info/direct_url.json
+```
+
+**升到 v0.3.0 之后**，包里有二进制文件（图片、PDF、字体、压缩包）的 skill
+安全扫描变成 `incomplete`，这是有意接受的行为，见 README「带二进制文件的
+skill 是 INCOMPLETE」。
 
 这时候顺便跑一次 `test_severity_enum_matches_upstream`。它平时是跳过的：
 要 import skillevaluator 的 Python 包，而那个包按设计独立装在 uv tool 里、
@@ -575,7 +595,8 @@ worker 写的报告，所以两者必须同机。要真正横向扩展需要先�
 | 现象 | 原因 | 处理 |
 | --- | --- | --- |
 | worker 启动即退出，日志写"启动自检未通过" | 扫描器缺失或 PATH 不对 | 检查 unit 里的 `Environment=PATH`，确认四个工具都能找到 |
-| `status` 一直是 `incomplete`，`incomplete_scans` 含 `skillspector` | 装了 2.10.0 及以上版本：覆盖被标 `partial`，扫描就不算跑全 | 降回 v2.9.6。升 skillevaluator 不解决——上游 #112 已合并，2.10+ 仍是 incomplete |
+| **所有** skill 的 `status` 都是 `incomplete`，`incomplete_scans` 含 `skillspector` | 装了 2.10.0 及以上版本：覆盖被标 `partial`，扫描就不算跑全 | 降回 v2.9.6。升 skillevaluator 不解决——上游 #112 已合并，2.10+ 仍是 incomplete |
+| **个别** skill 是 `incomplete`，`incomplete_scans` 含 `skillspector` | 包里有二进制文件（图片、PDF、字体、压缩包），SkillSpector 跳过了它们 | 不是故障，是有意接受的行为。Security Scan 的 `errors` 里写着原因，见 README「带二进制文件的 skill 是 INCOMPLETE」 |
 | 所有 skill 都报 `SCHEMA.author_missing` | `internal.yaml` 的邮箱域名还是 `example.com` | 改成公司域名 |
 | 出现 `name_consistency` | 管理系统的上传校验失效了 | 它在上传口就卡住"包名与文件内技能名一致"，所以这条**正常情况下不可能报**。报了就是那道校验被绕过、被放宽，或两边的归一化规则不同（大小写、空格、Unicode），先查上传侧 |
 | 每个 skill 都多出 `folder_hierarchy` | 物化布局异常 | 物化时没套上 `skills/` 那层，见 materialize.py |

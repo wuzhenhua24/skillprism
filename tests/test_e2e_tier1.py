@@ -10,6 +10,9 @@
 2. **物化布局造成的误报。** 目录名与层级会被 SCHEMA.name_consistency 和
    SCHEMA.folder_hierarchy 读取，布局不对会让每个 skill 都平白多出
    一条 HIGH 加一条 MEDIUM。
+3. **上游对扫描完整性的判法。** SkillEvaluator #112 起，包里有二进制文件的
+   skill 安全扫描记为 incomplete——同样的 skill 在 #112 之前是 passed。
+   这只有拿带二进制文件的内容真跑才看得见。
 
 缺少 CLI 或扫描器时自动跳过，因此本文件在裸环境下不会让 CI 变红；
 要显式排除则用 ``pytest -m "not e2e"``。
@@ -18,6 +21,8 @@
 from __future__ import annotations
 
 import shutil
+import struct
+import zlib
 from pathlib import Path
 
 import pytest
@@ -186,6 +191,53 @@ def test_security_scan_completes(env):
 
     validators = {v.validator for v in dto.tiers.tier1.validators}
     assert any("Security" in name for name in validators), "结果里没有安全扫描"
+
+
+def _one_pixel_png() -> bytes:
+    """一张 1×1 的真 PNG。用真格式而不是随便几个字节，测的是真实 skill 里的形态。"""
+
+    def chunk(kind: bytes, data: bytes) -> bytes:
+        return (
+            struct.pack(">I", len(data))
+            + kind
+            + data
+            + struct.pack(">I", zlib.crc32(kind + data) & 0xFFFFFFFF)
+        )
+
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", struct.pack(">IIBBBBB", 1, 1, 8, 2, 0, 0, 0))
+        + chunk(b"IDAT", zlib.compress(b"\x00\xff\x00\x00"))
+        + chunk(b"IEND", b"")
+    )
+
+
+@needs_cli
+@needs_scanners
+def test_binary_asset_makes_security_scan_incomplete(env):
+    """包里有二进制文件，安全扫描就没跑全——这是有意接受的行为。
+
+    SkillSpector 2.9.6 对二进制文件记一条 ``binary_content`` 跳过，覆盖率不到
+    100%。SkillEvaluator #112 之前不看这一项、照常判 passed；v0.3.0 按
+    statusless 契约判 incomplete。我们接受后者：给一个没扫全的 skill 发
+    "安全扫描通过"，正是 ``incomplete`` 不是通过要防的那种徽章。
+
+    和 test_security_scan_completes 是一对：同一份 fixture，只多一张图。
+    上游哪天把二进制文件当成"不适用"，这条会变红——那时要回头改 README
+    「带二进制文件的 skill 是 INCOMPLETE」和 docs/api.md §9。
+    """
+    assets = env.local_skills_root / SKILL_ID / "assets"
+    assets.mkdir()
+    (assets / "diagram.png").write_bytes(_one_pixel_png())
+
+    dto = _evaluate(env)
+
+    assert dto.status is EvaluationStatus.INCOMPLETE
+    assert "skillspector" in dto.evaluator.incomplete_scans
+
+    # 对接文档让管理系统去这里取原因，它必须真的在。
+    security = [v for v in dto.tiers.tier1.validators if "Security" in v.validator]
+    assert security and security[0].errors, "安全扫描没跑全，却没留下原因"
 
 
 @needs_cli

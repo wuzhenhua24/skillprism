@@ -28,7 +28,7 @@ pg = [
     "psycopg[binary]>=3.2",
 ]
 contract = [
-    "skillevaluator @ git+https://github.com/NVIDIA/SkillEvaluator.git",
+    "skillevaluator @ git+https://github.com/NVIDIA/SkillEvaluator.git@v0.3.0",
 ]
 
 [project.scripts]

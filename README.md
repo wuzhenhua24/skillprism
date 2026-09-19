@@ -21,8 +21,13 @@ cp .env.example .env
 SkillEvaluator **独立安装**，不要装进本服务的 venv（原因见下）：
 
 ```bash
-uv tool install --python 3.13 "skillevaluator[security] @ git+https://github.com/NVIDIA/SkillEvaluator.git"
+uv tool install --python 3.13 "skillevaluator[security] @ git+https://github.com/NVIDIA/SkillEvaluator.git@v0.3.0"
 ```
+
+**只装 tag，不要从 main 装。** 结论复用靠 `skillevaluator --version` 判断评测器
+变没变（见"结论按内容复用"），而上游只在发版时改这个号：0.2.1 之后 main 上
+18 个提交都报 `0.2.1`，其中 #112 改变了安全扫描的判法。从 main 装，换了评测器
+版本号却没变，旧结论被照常复用，不报任何错。
 
 Tier 1 的完整安全结论还需要三个外部扫描器：
 
@@ -39,8 +44,7 @@ SkillSpector 2.10.0 起对覆盖不完整的扫描 *fail closed*：当
 `SAFE` 升级为 `CAUTION`，同时保留诚实的 score 与 severity
 （见其 `nodes/report.py` 的升级分支）。这类报告以前会被 SkillEvaluator 当成
 "不可信"整份丢弃——上游 [#112](https://github.com/NVIDIA/SkillEvaluator/pull/112)
-已经修掉了这一条（`ff349e0`，2026-09-08 合入 main，未打 tag），**但 pin 还是
-不能松**。
+已经修掉了这一条（`ff349e0`，随 v0.3.0 发布），**但 pin 还是不能松**。
 
 #112 改的是"怎么解释这份报告"：SkillEvaluator 现在按版本分契约（2.9.5/2.9.6 是
 无 `status` 的旧 schema，2.10+ 带 `status`，2.11+ 要 `bundled_execution_surface`），
@@ -57,6 +61,11 @@ findings 从此会被保留，但**扫描本身仍然记为 incomplete**。到�
 | `ff349e0`（#112 之后） | 2.9.6 | passed | `[]` |
 | `ff349e0` | 2.10.0 | incomplete | `["skillspector"]` |
 | `ff349e0` | 2.11.1 | incomplete | `["skillspector"]` |
+| v0.3.0 | 2.9.6 | passed | `[]` |
+
+v0.3.0 另有 [#143](https://github.com/NVIDIA/SkillEvaluator/pull/143)：**恰好是**
+SkillSpector 2.11.2、且没有任何 ledger exception 的纯文档 skill，partial 也算扫完。
+它帮不上上面这类——`reference_unresolved` 本身就是一条 ledger exception。
 
 **触发面比想象中大。** SkillSpector 的引用解析会把路径样式的文本当作本地引用，
 解析不了就记一条 `reference_unresolved`、把覆盖标为 partial。一个
@@ -65,15 +74,39 @@ findings 从此会被保留，但**扫描本身仍然记为 incomplete**。到�
 没有关掉引用解析的开关——`--baseline` 压的是 findings 不是 completeness，
 何况 skillspector 由 skillevaluator 自己拉起，我们塞不进参数。
 
-**升级 SkillEvaluator 是安全的**（上表第二行已实测）。v2.9.6 现在是上游显式
-支持的契约，2.9.5/2.9.6 共用 statusless 分支并有 captured fixture
-`skillspector-2.9.6-no-llm.json`，不是碰巧能用。
+v2.9.6 是上游显式支持的契约，2.9.5/2.9.6 共用 statusless 分支并有 captured
+fixture `skillspector-2.9.6-no-llm.json`，不是碰巧能用。
 
 **解 pin 的前提**变成了二选一：SkillSpector 不再因非致命的
 `reference_unresolved` 判 partial；或者我们自己接受 coherent partial——后者要
 动 `adapter.py` 的判据，和"`incomplete_scans` 为空才复用"直接冲突，得单独决定。
 在那之前 `tests/test_e2e_tier1.py` 里的 `test_security_scan_completes` 继续当
 哨兵——它断言的正是上表那一列（`incomplete_scans == []`）。
+
+#### 带二进制文件的 skill 是 INCOMPLETE
+
+**#112 起，包里有任何二进制文件（图片、PDF、字体、压缩包）的 skill 安全扫描记为
+incomplete，pin 在 2.9.6 也一样。** SkillSpector 2.9.6 对二进制文件记一条
+`binary_content` 跳过，覆盖率因此不到 100%。#112 之前 SkillEvaluator 不看这一项、
+照常判 passed；之后按 statusless 契约要求每个分析器都做完，判 incomplete，
+SkillSpector 的 findings 也随之整份丢弃。
+
+这是**有意接受**的行为，不是待修的回归。旧判法给一个只扫了三分之一文件的
+skill 发"安全扫描通过"，正是"`incomplete` 不是通过"要防的那种徽章。实测：
+
+| skill | 二进制文件 | SkillSpector 覆盖率 | 3bfba44（#112 前） | v0.3.0 |
+| --- | --- | --- | --- | --- |
+| canvas-design | 54 个 `.ttf` | 34.9% | passed | incomplete，少 29 条 findings |
+| theme-factory | 1 个 `.pdf` | 92.3% | passed | incomplete |
+| web-artifacts-builder | 1 个 `.tar.gz` | 80.0% | passed | incomplete |
+| 上面那份 e2e fixture + 1 张 PNG | 1 个 `.png` | — | passed | incomplete |
+
+同一批 41 个真实 skill 里其余 38 个新旧结论完全一致。
+
+代价要说清楚：这类 skill **永远是 INCOMPLETE**，也永远不进复用，每次触发都会
+真跑一遍。原因写在 Security Scan 那个 validator 的 `errors` 里，管理系统可以直接
+展示。`test_binary_asset_makes_security_scan_incomplete` 钉住这个方向——上游哪天
+把二进制当成"不适用"，它会变红，那时再改这一节。
 
 装齐后启动：
 
@@ -392,7 +425,7 @@ SkillEvaluator 评不了。**由触发方保证只对 Skills 分类调用**，�
 
 | 条件 | 不卡住会怎样 |
 | --- | --- |
-| `evaluator_version` 相同 | 换了评测器还给旧结论，正是"分数怎么变了"最难查的形态 |
+| `evaluator_version` 相同 | 换了评测器还给旧结论，正是"分数怎么变了"最难查的形态。只在**装 tag** 时成立，见快速开始 |
 | `policy_file_hash` 相同 | 策略是"起点不是定论"，调完不重评，新策略对存量 skill 不生效 |
 | `incomplete_scans` 为空 | 把一次没跑全的扫描永久固化下来 |
 
