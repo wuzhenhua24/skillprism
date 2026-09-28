@@ -1,0 +1,304 @@
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index e6b3c9c..f4ef211 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -46,6 +46,12 @@ All notable changes to SkillEvaluator are documented in this file.
+   whether a catalog comparison ran; Tier 3 creates a missing starter dataset
+   and preserves existing evaluation sources.
+ 
++- Set `SKILLEVALUATOR_DOCKER_PREBUILT_AGENTS=claude-code` to run Docker-mode
++  Claude Code from a CLI that already ships in the evaluation image. Trials
++  verify it with `claude --version` instead of downloading and installing it
++  from `downloads.claude.ai` each time; unsupported agents and conflicting
++  provider wrappers fail before any trial starts.
++
+ ### Changed
+ 
+ - `validate PATH` now runs all three tiers for skills by default. Tier 3
+diff --git a/docs/agents-and-sandboxes.mdx b/docs/agents-and-sandboxes.mdx
+index 7ca7e01..6ff4e4a 100644
+--- a/docs/agents-and-sandboxes.mdx
++++ b/docs/agents-and-sandboxes.mdx
+@@ -195,6 +195,34 @@ Environment rules — size limits, auto-generated fallbacks, and sidecar
+ containers — are part of the `evals/` contract in
+ [Eval Datasets](eval-datasets.mdx).
+ 
++### Prebuilt agent CLIs
++
++By default the Claude Code agent installs itself in every trial container: it
++runs `apt-get` and downloads the native CLI from `downloads.claude.ai`, which
++is a full binary download per trial and fails on hosts that cannot reach that
++domain. When your evaluation image already ships the CLI, opt out of the
++per-trial install:
++
++```bash title="Verify the image's Claude Code instead of installing it"
++export SKILLEVALUATOR_DOCKER_PREBUILT_AGENTS=claude-code
++skillevaluator tier3 evaluate ./my-skill --agents claude-code --env-mode docker
++```
++
++Each trial then only runs `claude --version`; launch, credentials, and
++permission handling are unchanged. The image must provide `claude` on the agent
++user's `PATH` together with `ps` (`procps`), which Claude Code uses to clean up
++its process tree. Generated task images start `FROM python:3.12-slim`, and
++Docker uses a local image with that tag when one exists, so an operator-built
++image under that tag supplies the CLI to every generated task. If the image
++lacks the CLI, agent setup fails with exit 127 and an error naming this
++variable; add `--agent-runtime-preflight` to catch that in one bounded smoke
++trial before the full matrix runs.
++
++Only `claude-code` is supported, and only in `--env-mode docker`; other
++environment modes ignore the variable. Unsupported agent names, and providers
++whose compatibility wrapper installs the agent itself (such as `nv_build`),
++fail the run before any trial starts.
++
+ ## Local mode
+ 
+ <Warning>
+diff --git a/docs/environment-variables.mdx b/docs/environment-variables.mdx
+index e3d49ea..4b2e6d8 100644
+--- a/docs/environment-variables.mdx
++++ b/docs/environment-variables.mdx
+@@ -107,6 +107,7 @@ execution environments are covered in
+ | `SKILLEVALUATOR_LOCAL_STRICT_READS` | `false` | Tightens the sandbox's read-only view of the host system to a stricter path set. |
+ | `SKILLEVALUATOR_LOCAL_INHERIT_AGENT_KEYS` | `false` | When true, local-mode trials inherit the host's agent credential variables into their ambient environment. Off by default so a hostile skill command cannot read credentials — agents and verifiers receive credentials per-exec instead. |
+ | `SKILLEVALUATOR_RUNTIME_DIR` | `~/.local/share/skillevaluator/runtimes` | Where local mode looks for managed agent CLIs. Must be a dedicated subdirectory — not the home directory or one of its parents. |
++| `SKILLEVALUATOR_DOCKER_PREBUILT_AGENTS` | unset | Comma-separated agents whose CLI already ships in the Docker evaluation image; currently only `claude-code` (the `claude` alias is accepted). Docker-mode trials then verify the CLI with `claude --version` instead of downloading and installing it from `downloads.claude.ai` in every trial. Other environment modes ignore it. Unsupported names, and providers whose compatibility wrapper installs the agent itself (such as `nv_build`), fail the run before any trial starts. See [Prebuilt agent CLIs](agents-and-sandboxes.mdx#prebuilt-agent-clis). |
+ | `SKILL_EVAL_HARBOR_PREBUILD_TASK_ENVS` | unset | Set to exactly `1` to opt in to pre-building Harbor task environment images before trials start (other truthy spellings are not honored). Opt-in because concurrent trial cleanup can remove a shared prebuilt image that sibling trials still need. |
+ | `SKILL_EVAL_JUDGE_MODEL` | falls back to `SKILL_EVAL_LLM_MODEL` | Operator-controlled model override for the Tier 3 dimension judge in standard grading. `LLM_JUDGE_MODEL` is honored as a higher-precedence spelling; when neither is set, the judge uses `SKILL_EVAL_LLM_MODEL`, then the built-in judge default. Both spellings change only the model used with the configured `SKILL_EVAL_LLM_PROVIDER`; they do not select a separate judge provider, so the model must be supported by that provider. Standard grading makes both spellings resolve to the selected override in Harbor's parent process, then forwards them through its verifier-only job layer, which takes precedence over task and step verifier declarations. Neither name is injected into the evaluated agent's initial environment; attempts to set or reference one from skill-authored `runtime_env` or native `[environment.env]` tables are rejected. Native custom-only graders keep ownership of their verifier configuration. Shared agent/verifier containers are a process boundary, not a confidentiality boundary; use a separate verifier environment when the model name itself must be hidden from untrusted agent processes. `run_config.json` records the configured judge provider, model, source, `override_applied`, and catalog-verification status separately from agent models; an allowed provider fallback may use a different model for an individual judge call. When `override_applied` is false for a native Harbor task, `effective_model_source` is `native_harbor_runtime` and catalog verification is explicitly inconclusive because an authored task or step verifier declaration may supersede the recorded fallback. |
+ | `SKILLEVALUATOR_HARBOR_DIAGNOSTIC_ARTIFACT_MAX_BYTES` | `5242880` (5 MiB) | Size cap per diagnostic artifact copied from a Harbor trial into the results directory. Values are bounded to 0–67108864 bytes (64 MiB); `0` skips non-empty artifacts. Oversized artifacts are skipped and recorded in the artifact manifest. |
+diff --git a/src/skillevaluator/tier3/harbor/local_agents.py b/src/skillevaluator/tier3/harbor/local_agents.py
+index 3e5c090..ce98bd1 100644
+--- a/src/skillevaluator/tier3/harbor/local_agents.py
++++ b/src/skillevaluator/tier3/harbor/local_agents.py
+@@ -106,6 +106,26 @@ def _rewrite_launcher_segment(command: str, rewrite: Callable[[str], str]) -> st
+     return f"{rewrite(launcher)}{separator}{prompt}"
+ 
+ 
++#: Operator opt-in naming agents whose CLI already ships in the Docker evaluation image.
++PREBUILT_AGENTS_ENV = "SKILLEVALUATOR_DOCKER_PREBUILT_AGENTS"
++
++
++class SkillEvaluatorPrebuiltClaudeCode(ClaudeCode):
++    """Docker-mode Claude Code for evaluation images that already ship the CLI.
++
++    Harbor's stock install downloads the native binary from downloads.claude.ai
++    in every trial. With the operator opt-in, install only verifies the CLI the
++    image provides; launch, credentials, and permissions stay Harbor's.
++    """
++
++    async def install(self, environment: BaseEnvironment) -> None:
++        missing = shlex.quote(f"{PREBUILT_AGENTS_ENV} includes claude-code, but the image has no claude CLI on PATH")
++        await self.exec_as_agent(
++            environment,
++            command=f"command -v claude >/dev/null 2>&1 || {{ echo {missing} >&2; exit 127; }}; claude --version",
++        )
++
++
+ class SkillEvaluatorLocalClaudeCode(ClaudeCode):
+     """Claude Code wrapper that skips bootstrap install in local mode."""
+ 
+@@ -850,6 +870,10 @@ LOCAL_AGENT_IMPORT_PATHS = {
+     "opencode": "skillevaluator.tier3.harbor.local_agents:SkillEvaluatorLocalOpenCode",
+ }
+ 
++PREBUILT_AGENT_IMPORT_PATHS = {
++    "claude-code": "skillevaluator.tier3.harbor.local_agents:SkillEvaluatorPrebuiltClaudeCode",
++}
++
+ NVIDIA_BUILD_AGENT_IMPORT_PATHS = {
+     "claude-code": "skillevaluator.tier3.harbor.local_agents:SkillEvaluatorNvidiaBuildClaudeCode",
+     "codex": "skillevaluator.tier3.harbor.local_agents:SkillEvaluatorNvidiaBuildCodex",
+diff --git a/src/skillevaluator/tier3/harbor/runner.py b/src/skillevaluator/tier3/harbor/runner.py
+index 62ff9e3..62aa841 100644
+--- a/src/skillevaluator/tier3/harbor/runner.py
++++ b/src/skillevaluator/tier3/harbor/runner.py
+@@ -1247,6 +1247,37 @@ def _model_for_agent(
+ 
+ 
+ def _agent_import_path(provider: ProviderConfig, agent: str, env_mode: str) -> str | None:
++    """Select the provider wrapper, or the prebuilt-CLI wrapper the operator opted into."""
++    import_path = _provider_agent_import_path(provider, agent, env_mode)
++    if env_mode != "docker" or agent not in _prebuilt_agents():
++        return import_path
++    from skillevaluator.tier3.harbor.local_agents import PREBUILT_AGENT_IMPORT_PATHS, PREBUILT_AGENTS_ENV
++
++    if import_path is not None:
++        raise ValueError(
++            f"{PREBUILT_AGENTS_ENV} includes {agent}, but the {provider.provider} provider routes {agent} "
++            "through a compatibility wrapper that installs the agent itself; unset it for this provider."
++        )
++    return PREBUILT_AGENT_IMPORT_PATHS[agent]
++
++
++def _prebuilt_agents() -> frozenset[str]:
++    """Return the agents whose CLI the operator ships in the Docker evaluation image."""
++    from skillevaluator.tier3.harbor import canonical_agent_name
++    from skillevaluator.tier3.harbor.local_agents import PREBUILT_AGENT_IMPORT_PATHS, PREBUILT_AGENTS_ENV
++
++    raw = os.environ.get(PREBUILT_AGENTS_ENV, "")
++    selected = frozenset(canonical_agent_name(name.strip()) for name in raw.split(",") if name.strip())
++    unsupported = sorted(selected - PREBUILT_AGENT_IMPORT_PATHS.keys())
++    if unsupported:
++        raise ValueError(
++            f"{PREBUILT_AGENTS_ENV} supports only {', '.join(sorted(PREBUILT_AGENT_IMPORT_PATHS))}; "
++            f"unsupported: {', '.join(unsupported)}"
++        )
++    return selected
++
++
++def _provider_agent_import_path(provider: ProviderConfig, agent: str, env_mode: str) -> str | None:
+     """Select only the provider-specific wrappers required for this environment."""
+     if provider.provider == "openai-compatible" and agent == "codex" and env_mode != ENV_MODE_LOCAL:
+         return "skillevaluator.tier3.harbor.local_agents:SkillEvaluatorGatewayCodex"
+@@ -2012,14 +2043,14 @@ def _run_harbor_eval_impl(
+             env_mode=env_mode,
+             model_sources={agent: details["source"] for agent, details in model_resolution.items()},
+         )
++        agent_import_paths = {
++            agent: import_path
++            for agent in agents
++            if (import_path := _agent_import_path(provider, agent, env_mode)) is not None
++        }
+     except ValueError as exc:
+         reporter.emit(ProgressEvent(stage="credential-validation", state="failed", detail=str(exc)))
+         return {"error": [str(exc)]}
+-    agent_import_paths = {
+-        agent: import_path
+-        for agent in agents
+-        if (import_path := _agent_import_path(provider, agent, env_mode)) is not None
+-    }
+     runtime_secret_values = set().union(
+         *(secret_values_from_environment(plan.subprocess_env) for plan in runtime_plans.values())
+     )
+diff --git a/tests/tier3/test_prebuilt_agents.py b/tests/tier3/test_prebuilt_agents.py
+new file mode 100644
+index 0000000..5322170
+--- /dev/null
++++ b/tests/tier3/test_prebuilt_agents.py
+@@ -0,0 +1,126 @@
++# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
++# SPDX-License-Identifier: Apache-2.0
++
++import asyncio
++
++import pytest
++
++pytest.importorskip("harbor")
++
++from harbor.agents.factory import AgentFactory
++from harbor.agents.installed.base import NonZeroAgentExitCodeError
++from harbor.environments.base import ExecResult
++from harbor.models.trial.config import AgentConfig
++
++from skillevaluator.provider_config import ProviderConfig
++from skillevaluator.tier3.harbor import local_agents, runner
++
++PREBUILT_CLAUDE_CODE = "skillevaluator.tier3.harbor.local_agents:SkillEvaluatorPrebuiltClaudeCode"
++
++
++def _provider(name: str) -> ProviderConfig:
++    return ProviderConfig(
++        provider=name,
++        model="vendor/model",
++        api_key="test-key",
++        base_url="https://example.com/v1",
++        litellm_model="openai/vendor/model",
++    )
++
++
++class RecordingEnvironment:
++    def __init__(self, return_code: int = 0):
++        self.commands: list[str] = []
++        self.return_code = return_code
++
++    async def exec(self, command, **_kwargs):
++        self.commands.append(command)
++        return ExecResult(return_code=self.return_code, stdout="2.1.283 (Claude Code)", stderr="")
++
++
++@pytest.mark.parametrize("value", ["claude-code", "claude", " claude-code , "])
++@pytest.mark.parametrize("provider", ["anthropic", "openai", "openai-compatible", "bedrock"])
++def test_docker_opt_in_selects_prebuilt_claude_code(monkeypatch, provider, value):
++    monkeypatch.setenv(local_agents.PREBUILT_AGENTS_ENV, value)
++
++    assert runner._agent_import_path(_provider(provider), "claude-code", "docker") == PREBUILT_CLAUDE_CODE
++
++
++@pytest.mark.parametrize("mode", sorted(runner.HARBOR_ENV_MODES - {"docker"}))
++@pytest.mark.parametrize("provider", ["anthropic", "nv_build", "openai-compatible"])
++@pytest.mark.parametrize("agent", ["claude-code", "codex", "opencode"])
++def test_opt_in_leaves_other_modes_on_their_existing_routes(monkeypatch, mode, provider, agent):
++    config = _provider(provider)
++    monkeypatch.delenv(local_agents.PREBUILT_AGENTS_ENV, raising=False)
++    expected = runner._agent_import_path(config, agent, mode)
++
++    monkeypatch.setenv(local_agents.PREBUILT_AGENTS_ENV, "claude-code")
++
++    assert runner._agent_import_path(config, agent, mode) == expected
++
++
++@pytest.mark.parametrize("value", [None, "", " , "])
++def test_without_opt_in_docker_keeps_stock_claude_code(monkeypatch, value):
++    if value is None:
++        monkeypatch.delenv(local_agents.PREBUILT_AGENTS_ENV, raising=False)
++    else:
++        monkeypatch.setenv(local_agents.PREBUILT_AGENTS_ENV, value)
++
++    assert runner._agent_import_path(_provider("anthropic"), "claude-code", "docker") is None
++
++
++def test_opt_in_rejects_agents_without_a_prebuilt_wrapper(monkeypatch):
++    monkeypatch.setenv(local_agents.PREBUILT_AGENTS_ENV, "claude-code,codex")
++
++    with pytest.raises(ValueError, match="supports only claude-code; unsupported: codex"):
++        runner._agent_import_path(_provider("anthropic"), "claude-code", "docker")
++
++
++def test_opt_in_rejects_a_provider_wrapper_that_installs_the_agent(monkeypatch):
++    monkeypatch.setenv(local_agents.PREBUILT_AGENTS_ENV, "claude-code")
++
++    with pytest.raises(ValueError, match="nv_build provider routes claude-code through a compatibility wrapper"):
++        runner._agent_import_path(_provider("nv_build"), "claude-code", "docker")
++
++
++def test_docker_command_dispatches_prebuilt_claude_code_by_import_path(tmp_path):
++    command = runner.build_harbor_run_command(
++        dataset_path=tmp_path / "tasks",
++        agent="claude-code",
++        job_name="prebuilt",
++        env_mode="docker",
++        model="vendor/model",
++        agent_import_path=PREBUILT_CLAUDE_CODE,
++    )
++
++    assert command[command.index("--agent-import-path") + 1] == PREBUILT_CLAUDE_CODE
++    assert "-a" not in command
++
++
++def _prebuilt_agent(tmp_path):
++    return AgentFactory.create_agent_from_config(
++        AgentConfig(import_path=PREBUILT_CLAUDE_CODE, model_name="vendor/model"),
++        logs_dir=tmp_path / "logs",
++    )
++
++
++def test_prebuilt_install_only_verifies_the_image_cli(tmp_path):
++    agent = _prebuilt_agent(tmp_path)
++    environment = RecordingEnvironment()
++
++    asyncio.run(agent.install(environment))
++
++    assert len(environment.commands) == 1
++    install = environment.commands[0]
++    assert install.endswith("claude --version")
++    for downloader in ("downloads.claude.ai", "bootstrap.sh", "curl", "apt-get", "npm install"):
++        assert downloader not in install
++
++
++def test_prebuilt_install_fails_with_the_opt_in_named_when_the_cli_is_missing(tmp_path):
++    agent = _prebuilt_agent(tmp_path)
++    environment = RecordingEnvironment(return_code=127)
++
++    with pytest.raises(NonZeroAgentExitCodeError, match="exit 127"):
++        asyncio.run(agent.install(environment))
++    assert local_agents.PREBUILT_AGENTS_ENV in environment.commands[0]

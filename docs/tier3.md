@@ -168,7 +168,9 @@ Harbor 的原生类，CLI 与 `evals/config.yml` 都没有换类的入口。所�
 - **要维护一个 fork**。在 fork 上打 tag（例如 `v0.3.0-prebuilt.1`）再
   `uv tool install`，仍然遵守"只装 tag"。补丁不改版本号，`skillevaluator --version`
   仍报 `0.3.0`；它只影响 docker 模式下显式开启的 claude-code，Tier 1 结论不受影响。
-  升级上游时要重新打补丁，最好提给上游。补丁没有跑过上游的单元测试。
+  升级上游时要重新打补丁，最好提给上游。补丁没有跑过上游的单元测试；基于上游
+  main、补齐测试与文档的版本和 PR 说明草稿见
+  [upstream/prebuilt-claude-code-pr.md](upstream/prebuilt-claude-code-pr.md)。
 - **Claude Code 版本钉在镜像里**，升级要重建镜像。对评测这反而是好事：agent 版本
   也决定结论，应当进复用键。
 - **同名 tag 会影响这台机器上其他 `FROM python:3.12-slim` 的构建**，评测机专用即可。
