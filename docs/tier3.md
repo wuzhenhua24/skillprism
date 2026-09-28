@@ -161,4 +161,13 @@ docker build -q -t python:3.12-slim "$ctx" >/dev/null
 rm -rf "$ctx"
 ```
 
-环境变量（上面「配置」那四个）在环境设置里添加后，**只对新会话生效**。
+环境变量在环境设置里添加后，**只对新会话生效**。方舟的 key 与地址**不要**直接存成
+`ANTHROPIC_API_KEY` / `ANTHROPIC_BASE_URL`——云端会话自己的 Claude Code 也读这两个
+名字，可能被一起改道到方舟。换个名字存（例如 `ARK_API_KEY`、`ARK_ANTHROPIC_BASE_URL`），
+只在调用 skillevaluator 时映射过去：
+
+```bash
+env SKILL_EVAL_LLM_PROVIDER=anthropic SKILL_EVAL_LLM_MODEL=<模型名> \
+  ANTHROPIC_API_KEY="$ARK_API_KEY" ANTHROPIC_BASE_URL="$ARK_ANTHROPIC_BASE_URL" \
+  skillevaluator tier3 evaluate <skill 目录> --agents claude-code --env-mode docker ...
+```
