@@ -1,0 +1,67 @@
+diff --git a/src/skillevaluator/tier3/harbor/local_agents.py b/src/skillevaluator/tier3/harbor/local_agents.py
+index 605ecc3..fe11004 100644
+--- a/src/skillevaluator/tier3/harbor/local_agents.py
++++ b/src/skillevaluator/tier3/harbor/local_agents.py
+@@ -807,6 +807,23 @@ class SkillEvaluatorLocalNvidiaBuildClaudeCode(
+     """Managed local Claude Code CLI routed through an authenticated host bridge."""
+ 
+ 
++class SkillEvaluatorPrebuiltClaudeCode(ClaudeCode):
++    """Docker-mode Claude Code for evaluation images that already ship the CLI.
++
++    Harbor's stock install re-downloads the native binary (~240 MB) from
++    downloads.claude.ai in every trial. Operators who bake Claude Code into the
++    evaluation base image opt in via SKILLEVALUATOR_DOCKER_PREBUILT_AGENTS, and
++    install only verifies the CLI. Everything else stays Harbor's stock agent.
++    """
++
++    async def install(self, environment: BaseEnvironment) -> None:
++        await self.exec_as_agent(environment, command="claude --version")
++
++
++PREBUILT_AGENT_IMPORT_PATHS = {
++    "claude-code": "skillevaluator.tier3.harbor.local_agents:SkillEvaluatorPrebuiltClaudeCode",
++}
++
+ LOCAL_AGENT_IMPORT_PATHS = {
+     "claude-code": "skillevaluator.tier3.harbor.local_agents:SkillEvaluatorLocalClaudeCode",
+     "codex": "skillevaluator.tier3.harbor.local_agents:SkillEvaluatorLocalCodex",
+diff --git a/src/skillevaluator/tier3/harbor/runner.py b/src/skillevaluator/tier3/harbor/runner.py
+index 3c58677..7cddffc 100644
+--- a/src/skillevaluator/tier3/harbor/runner.py
++++ b/src/skillevaluator/tier3/harbor/runner.py
+@@ -1228,6 +1228,21 @@ def _nvidia_build_agent_import_path(provider: ProviderConfig, agent: str, env_mo
+     return None
+ 
+ 
++PREBUILT_AGENTS_ENV = "SKILLEVALUATOR_DOCKER_PREBUILT_AGENTS"
++
++
++def _prebuilt_agent_import_path(agent: str, env_mode: str) -> str | None:
++    """Return the verify-only wrapper when the operator's image already ships the agent CLI."""
++    if env_mode != "docker":
++        return None
++    selected = {name.strip() for name in os.environ.get(PREBUILT_AGENTS_ENV, "").split(",") if name.strip()}
++    if agent not in selected:
++        return None
++    from skillevaluator.tier3.harbor.local_agents import PREBUILT_AGENT_IMPORT_PATHS
++
++    return PREBUILT_AGENT_IMPORT_PATHS.get(agent)
++
++
+ def _run_harbor(
+     *,
+     dataset: Path,
+@@ -1975,7 +1990,11 @@ def _run_harbor_eval_impl(
+     nvidia_build_agent_import_paths = {
+         agent: import_path
+         for agent in agents
+-        if (import_path := _nvidia_build_agent_import_path(provider, agent, env_mode)) is not None
++        if (
++            import_path := _nvidia_build_agent_import_path(provider, agent, env_mode)
++            or _prebuilt_agent_import_path(agent, env_mode)
++        )
++        is not None
+     }
+     runtime_secret_values = set().union(
+         *(secret_values_from_environment(plan.subprocess_env) for plan in runtime_plans.values())

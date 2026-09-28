@@ -94,11 +94,86 @@ SkillEvaluator v0.3.0，上游自带的参考 skill `calculator`（2 条用例�
   | --- | --- | --- |
   | Docker Hub `python:3.12-slim` | 评测镜像的基础镜像 | 首次构建 |
   | `deb.debian.org` / `pypi.org` | 镜像里装 apt 包与打分脚本依赖 | 首次构建 |
-  | `downloads.claude.ai` | Harbor 在**每个 trial** 里现装 Claude Code，没有镜像源开关 | 每次运行 |
+  | `downloads.claude.ai` | Harbor 在**每个 trial** 里现装 Claude Code（约 240 MB），没有镜像源开关；用预装镜像后不再需要，见下一节 | 每次运行 |
   | 方舟端点 | agent 与 judge | 每次运行 |
 
   评测镜像 `FROM python:3.12-slim`，本地已有同名镜像时不再拉取——需要换源或加
   CA 时，可以预先构建一个配好的同名镜像（下面的云端脚本就是这么做的）。
+
+## 预装 Claude Code：不依赖 downloads.claude.ai
+
+**只把 Claude Code 打进镜像不够。** Harbor 的 claude-code 在每个 trial 都执行一遍
+安装，没有"已装就跳过"：Debian 镜像上先 `apt-get update && apt-get install curl
+procps`，再在 `set -euo pipefail` 下执行
+`curl -fsSL https://downloads.claude.ai/claude-code-releases/bootstrap.sh | bash`。
+bootstrap.sh 把下载地址写死、没有镜像源变量，每次都重新下载整个二进制（2.1.283 的
+linux-x64 是 241.6 MB）。docker 模式下 SkillEvaluator 固定传 `-a claude-code` 用
+Harbor 的原生类，CLI 与 `evals/config.yml` 都没有换类的入口。所以镜像里装没装，
+这个地址不通 trial 就失败。
+
+**做法是一个小补丁加一个预装镜像：**
+
+1. 补丁 [`upstream/skillevaluator-prebuilt-claude-code.patch`](upstream/skillevaluator-prebuilt-claude-code.patch)
+   （对 v0.3.0，两个文件共 +37 / −1 行）。新增 `SkillEvaluatorPrebuiltClaudeCode`，安装
+   步骤只执行 `claude --version`；只有 docker 模式且设了
+   `SKILLEVALUATOR_DOCKER_PREBUILT_AGENTS=claude-code` 时才启用。权限模式、凭据、
+   运行命令都还是 Harbor 原生类的。换类走的是上游已有的 `--agent-import-path`
+   通道——NVIDIA Build 在 docker 模式下就是这么换的。
+2. 预装镜像。SkillEvaluator 生成的每个任务镜像都 `FROM python:3.12-slim`，本地有
+   同名镜像时直接用，所以在评测机上构建一个同名镜像：
+
+   ```bash
+   # 在能访问 downloads.claude.ai 的任意机器上下载一次，按 manifest 校验
+   V=2.1.283
+   BASE=https://downloads.claude.ai/claude-code-releases
+   curl -fsSL -o claude "$BASE/$V/linux-x64/claude"
+   curl -fsSL "$BASE/$V/manifest.json" | jq -r '.platforms["linux-x64"].checksum'
+   sha256sum claude   # 两个值必须一致
+
+   # 在评测机上：保留官方镜像，本地同名 tag 指向预装版本
+   docker pull python:3.12-slim
+   docker tag python:3.12-slim python:3.12-slim-upstream
+   docker build -t python:3.12-slim .
+   ```
+
+   ```dockerfile
+   FROM python:3.12-slim-upstream
+   # Harbor 清理 claude 进程树时要用 ps/pgrep
+   RUN apt-get update && apt-get install -y --no-install-recommends procps \
+       && rm -rf /var/lib/apt/lists/*
+   COPY claude /usr/local/bin/claude
+   RUN chmod 755 /usr/local/bin/claude && claude --version
+   ```
+
+   任务镜像构建时还要 `apt-get` 和 `pip install` 打分依赖（ragas、
+   langchain-community、openai、anthropic、boto3、idna）。这些层对所有任务都一样，
+   构建一次之后走 Docker 层缓存；国内源可以一并写进这个镜像的 apt / pip 配置里。
+
+装了 Claude Code 之后，Harbor 给它设了 `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`，
+不再自动更新、不发遥测，运行期只连 `ANTHROPIC_BASE_URL`。
+
+**实测**（同一个 mock 端点，calculator 两臂各 2 条）：
+
+| 配置 | trial 里的安装步骤 | 耗时 |
+| --- | --- | --- |
+| 原生 | `apt-get` + 下载 `bootstrap.sh` 与二进制 | 318 秒 |
+| 补丁 + 预装镜像 | 只有 `claude --version` | 245 秒 |
+| 同上，且容器禁止访问外网（只放行宿主上的 mock） | 只有 `claude --version` | 107 秒，4/4 打分完成 |
+
+最后一行的镜像层已在上一次构建时缓存。禁止外网时原生做法必然失败——
+`downloads.claude.ai` 不通，安装命令在 `pipefail` 下直接报错。
+
+**代价：**
+
+- **要维护一个 fork**。在 fork 上打 tag（例如 `v0.3.0-prebuilt.1`）再
+  `uv tool install`，仍然遵守"只装 tag"。补丁不改版本号，`skillevaluator --version`
+  仍报 `0.3.0`；它只影响 docker 模式下显式开启的 claude-code，Tier 1 结论不受影响。
+  升级上游时要重新打补丁，最好提给上游。补丁没有跑过上游的单元测试。
+- **Claude Code 版本钉在镜像里**，升级要重建镜像。对评测这反而是好事：agent 版本
+  也决定结论，应当进复用键。
+- **同名 tag 会影响这台机器上其他 `FROM python:3.12-slim` 的构建**，评测机专用即可。
+- 如果本地有 `skillevaluator-base:*` 缓存镜像，换了 `python:3.12-slim` 之后要删掉：
+  它的 tag 只按 Dockerfile 文本计算，`FROM` 的名字没变就会被原样复用。
 
 ## SkillPrism 要改的
 
