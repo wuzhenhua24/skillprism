@@ -939,6 +939,7 @@ SKILL_EVAL_EMBEDDING_API_KEY=<ARK_API_KEY>
   单个 catalog 建库上限 256 个 skill，实测单条记录约 51 KB。
   `queue.py` 的 `index` 队列与 DTO 的 `tiers.tier2` 已预留。
 - **Tier 3**：需要 Docker/K8s 沙箱、agent 凭据、评测预算。`sandbox` 队列与 `tiers.tier3` 已预留。
+  选型（claude-code + 方舟 + docker 模式）与实测记录见 [docs/tier3.md](docs/tier3.md)。
 - **扫描器版本未纳入复用判据**：见上面「结论按内容复用」。
 - **批量查询结果**：列表页按 skill_id 逐个查会打 N 次，需要时补。
 - **跨 skill 调用关系的校验**：见上面「一组耦合 skill」的最后一段，
