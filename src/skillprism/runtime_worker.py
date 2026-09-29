@@ -180,7 +180,7 @@ def _evaluate(
         task_queue.finish(session, task, error=str(exc))
         return EvaluationStatus.ERROR
 
-    probe_failure = probe_gateway(settings)
+    probe_failure = probe_gateway(settings) if settings.runtime_probe_gateway else None
     if probe_failure is not None:
         _requeue(session, task, settings, probe_failure)
         return EvaluationStatus.ERROR
@@ -220,6 +220,21 @@ def _evaluate(
         _requeue(session, task, settings, outcome.error or "全部用例都没被判定")
         return EvaluationStatus.ERROR
 
+    if profile.engine_version and outcome.engine_version and outcome.engine_version != profile.engine_version:
+        # 本机运行时预检已经核对过；沙箱里的版本只有跑完才看得到（skill-up 会按
+        # engine.version 安装，但镜像里预装的另一个版本也可能被直接用上）。
+        # 版本进指纹，对不上的结论不能写：复用会把它当成钉住那个版本的结论。
+        # 重试也是同一个镜像，所以直接结束。
+        task_queue.finish(
+            session,
+            task,
+            error=(
+                f"agent 实际的 Claude Code 版本是 {outcome.engine_version}，"
+                f"配置钉的是 {profile.engine_version}（SKILLPRISM_RUNTIME_ENGINE_VERSION）"
+            ),
+        )
+        return EvaluationStatus.ERROR
+
     uris = _store_reports(
         storage, run, content_hash, profile.fingerprint, settings.runtime_iterations, scrub
     )
@@ -230,8 +245,9 @@ def _evaluate(
         profile=profile,
         outcome=outcome,
         uris=uris,
-        # skill-up 静态探测到的版本。预检已经核对过和配置一致，这里如实记下。
-        engine_version=outcome.engine_version or profile.engine_version,
+        # skill-up 探测到的版本。钉了版本时上面已经核对过；没钉（沙箱模式跟着
+        # 镜像走）时它是唯一能说明用了哪个版本的记录。
+        engine_version=outcome.engine_version or profile.engine_version or None,
     )
     save_runtime_result(session, row)
     task_queue.finish(session, task)
@@ -280,7 +296,7 @@ def _to_row(
     profile: RuntimeProfile,
     outcome: RuntimeOutcome,
     uris: dict[str, str | None],
-    engine_version: str,
+    engine_version: str | None,
 ) -> RuntimeResult:
     return RuntimeResult(
         id=str(uuid.uuid4()),

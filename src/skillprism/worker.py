@@ -546,11 +546,12 @@ def main(argv: list[str] | None = None) -> int:
             logger.error("启动自检未通过：%s", exc)
             return 1
         logger.info(
-            "skill-up: %s (%s)，claude: %s (%s)，模型 %s",
+            "skill-up: %s (%s)，claude: %s (%s)，环境 %s，模型 %s",
             ready.skillup_bin,
             settings.skillup_version,
-            ready.claude_bin,
-            settings.runtime_engine_version,
+            ready.claude_bin or "沙箱内",
+            settings.runtime_engine_version or "跟随镜像",
+            settings.runtime_environment,
             settings.runtime_model,
         )
         process = make_process_runtime_task(ready)

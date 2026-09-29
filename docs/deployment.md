@@ -659,6 +659,11 @@ agent 以 `skillprism` 身份在本机跑，Claude Code 带着 `bypassPermission
 
 本期能做的：模型 key 用专门的一个并设额度上限，泄漏了损失有上限、能单独吊销。
 
+**有 OpenSandbox 就用它**（`SKILLPRISM_RUNTIME_ENVIRONMENT=opensandbox`，见下面的
+[在 OpenSandbox 里跑](#在-opensandbox-里跑)）。agent 换到每个用例一个的远程沙箱里，
+上面这两条都不再成立：它读不到本机的任何文件。它仍然拿得到模型 key——key 要
+注入沙箱它才能调模型——所以 key 专用、设额度这条照做。
+
 ### 安装
 
 两样东西都要在能联网的机器上准备好再拷过来（本机出网受限）。
@@ -722,6 +727,79 @@ SKILLPRISM_RUNTIME_ENV=
 **换模型、换迭代次数、换 skill-up 或 Claude Code 版本，已有结论都会被视为另一种结论**
 （进运行时指纹），下次触发时重跑。并发与网关地址不在其中。
 
+### 在 OpenSandbox 里跑
+
+每个用例建一个沙箱：装 Claude Code、传 skill 与 fixture、跑 agent 和判分、把产物
+下载回来、销毁。worker 本机只跑 skill-up，**不需要装 Claude Code**，
+`SKILLPRISM_RUNTIME_PATH` 可以留空（默认 `/usr/local/bin:/usr/bin:/bin`，只要能
+找到 skill-up 就行）。
+
+在上面的配置之外追加：
+
+```bash
+SKILLPRISM_RUNTIME_ENVIRONMENT=opensandbox
+SKILLPRISM_OPENSANDBOX_BASE_URL=https://<OpenSandbox 服务地址>
+SKILLPRISM_OPENSANDBOX_API_KEY=
+# 预装好 SKILLPRISM_RUNTIME_ENGINE_VERSION 那个版本 Claude Code 的镜像（见下）
+SKILLPRISM_OPENSANDBOX_IMAGE=
+# 一个任务最多同时开几个沙箱（即用例并发，沙箱模式下取代 SKILLPRISM_RUNTIME_PARALLELISM）
+SKILLPRISM_OPENSANDBOX_MAX_SANDBOXES=2
+# 沙箱启动命令，JSON 数组；留空用 skill-up 默认的 tail -F /dev/null
+SKILLPRISM_OPENSANDBOX_ENTRYPOINT=["tail","-f","/dev/null"]
+# OpenSandbox SDK 单个请求的超时（秒），留空用 SDK 默认
+SKILLPRISM_OPENSANDBOX_REQUEST_TIMEOUT_SECONDS=600
+# 公司部署特有的参数，JSON 对象、值都是字符串，原样给 skill-up
+SKILLPRISM_OPENSANDBOX_EXTENSIONS=
+# worker 连不到沙箱本身的地址、只能连服务地址时设 true
+SKILLPRISM_OPENSANDBOX_USE_SERVER_PROXY=false
+# 等沙箱就绪的上限；SDK 默认只有 30 秒
+SKILLPRISM_OPENSANDBOX_READY_TIMEOUT_SECONDS=120
+# 沙箱存活上限，0 = 就绪等待 + 2 × 单用例上限 + 300 秒。worker 被杀时靠它回收沙箱
+SKILLPRISM_OPENSANDBOX_SANDBOX_TIMEOUT_SECONDS=0
+# 沙箱出网：空（服务端默认）/ deny_all / allow_declared。allow_declared 时网关主机自动放行
+SKILLPRISM_OPENSANDBOX_NETWORK_POLICY=
+SKILLPRISM_OPENSANDBOX_ALLOWED_EGRESS=
+# 注入沙箱里命令的环境变量（K=V 逗号分隔）。不能设 ANTHROPIC_*、GATEWAY_*、CLAUDE_CODE_*
+SKILLPRISM_OPENSANDBOX_ENV=
+# worker 自己连不上模型网关（只有沙箱连得上）时关掉探活，否则每个任务都被判死
+SKILLPRISM_RUNTIME_PROBE_GATEWAY=true
+```
+
+**同时存在的沙箱数 = `SKILLPRISM_OPENSANDBOX_MAX_SANDBOXES` × sandbox worker 进程数。**
+一个 sandbox worker 一次只处理一个任务；多轮迭代是一轮跑完再跑下一轮，不会叠加。
+按资源调整时改这一个数就行，它不进指纹，已有结论不受影响。
+
+**和 skill-up 命令行对照**（排查时用命令行复现一次最快）：
+
+| 命令行手工跑 | 平台配置 |
+| --- | --- |
+| `export OPENSANDBOX_API_KEY=…` | `SKILLPRISM_OPENSANDBOX_API_KEY` |
+| `kwargs.base_url` 或 `OPENSANDBOX_BASE_URL` | `SKILLPRISM_OPENSANDBOX_BASE_URL` |
+| 宿主机的 `ANTHROPIC_BASE_URL` | `SKILLPRISM_RUNTIME_BASE_URL`（同一个值） |
+| `--provider anthropic --api-key "$ANTHROPIC_AUTH_TOKEN"` | `SKILLPRISM_RUNTIME_API_KEY` |
+| `--model <模型>` | `SKILLPRISM_RUNTIME_MODEL`（agent_judge 另配 `_JUDGE_MODEL`，留空同它） |
+
+平台的 provider 叫 `gateway` 而不是 `anthropic`（理由见 runtime-evaluation.md §5.3），
+skill-up 读的是 `GATEWAY_BASE_URL` / `GATEWAY_API_KEY`，注入沙箱时同样变成
+`ANTHROPIC_API_KEY`、`ANTHROPIC_AUTH_TOKEN`、`ANTHROPIC_BASE_URL`。只认 Bearer 的
+网关也能用。
+
+`SKILLPRISM_RUNTIME_ENV` 在这个模式下给的是 **worker 上的 skill-up 进程**（例如
+连 OpenSandbox 要走的代理），`SKILLPRISM_OPENSANDBOX_ENV` 给的才是沙箱里的 agent。
+
+**Claude Code 版本跟着镜像走**：沙箱模式下 `SKILLPRISM_RUNTIME_ENGINE_VERSION`
+**留空**即可，用镜像里装好的那个；每条结论记下实际用的版本（`engine_version`）。
+镜像 tag 进指纹，换镜像就重跑，所以**镜像 tag 要不可变**——同一个 tag 重新推一个
+装了别的版本的镜像，复用看不出来。镜像里还要有 `bash`、`git`。
+
+要钉版本也可以填上。那样 skill-up 发现镜像里的版本不符时会在每个沙箱里用
+nvm + npm 现装（要能访问 GitHub、nodejs.org 与 npm 源，每个用例多一两分钟），
+跑完后平台再核对一次，不一致的任务直接失败、不写结论。
+
+**进运行时指纹的：** 运行环境、镜像、出网策略和额外放行的目标。换镜像就是另一种
+结论——镜像决定了 agent 手边有哪些工具。服务地址、key、扩展参数、超时、
+server proxy 不进指纹。本机模式的指纹和加入沙箱支持之前完全一样，已有结论照常复用。
+
 ### systemd
 
 ```bash
@@ -760,6 +838,8 @@ sudo systemctl enable --now skillprism-worker-sandbox
 
 启动时自检：配置缺项、`skill-up --version` 或 `claude --version` 和配置钉的版本对不上，
 都会**拒绝启动**，日志里写明是哪一项。两个 worker 领的是不同队列，互不干扰。
+OpenSandbox 模式下不查本机的 claude，也不在启动时建沙箱：服务连不连得上要等第一个
+任务才知道（见故障排查）。
 
 ### 验证
 
@@ -787,6 +867,10 @@ curl -s http://127.0.0.1:8000/api/skills/ticket-formatter/runtime-evaluation | p
 | 任务 `error` 为「用例无效：…」 | 作者的用例 skill-up 校验不过，原文附在后面 | 转给作者 |
 | 任务在退避重试，`error` 为「模型网关不可达 / 返回 401」 | 网关地址、key 或网络 | 手工探一次（见下），应当是 200。实测一次要 3～8 秒 |
 | 任务在退避重试，`error` 为「全部用例都没被判定：…context deadline exceeded…」 | 探活通过后网关变慢或限流，每个用例都耗满了超时 | 看网关侧；用例本身很长时调大 `SKILLPRISM_RUNTIME_CASE_TIMEOUT_SECONDS` |
+| 任务在退避重试，`error` 里有 `failed to create opensandbox` | OpenSandbox 服务地址、key 或网络 | 看后面的原文：`connection refused` / `401` / 镜像拉不下来。同一个 key 用 `skill-up` 命令行在这台机器上实跑一次对照 |
+| 任务在退避重试，`error` 里有 `failed to install agent` | 镜像里没有对应版本的 Claude Code，沙箱里现装又失败（多半是出网受限） | 换预装好的镜像；或者用 `SKILLPRISM_OPENSANDBOX_ENV` 指一个内部 npm 源（`NPM_CONFIG_REGISTRY=…`），`allow_declared` 时还要放行它 |
+| 任务失败，「agent 实际的 Claude Code 版本是 …」 | 钉了 `SKILLPRISM_RUNTIME_ENGINE_VERSION`，沙箱里用上的 claude 和它不一致 | 对齐镜像与配置，或者沙箱模式下直接留空跟着镜像走。重试没用，所以不重试 |
+| OpenSandbox 模式下每个用例都 `context deadline exceeded` | 沙箱里连不上模型网关（worker 探活能通不代表沙箱能通） | 让沙箱能访问网关；用 `allow_declared` 时确认网关的主机名就是 `SKILLPRISM_RUNTIME_BASE_URL` 里那个 |
 | `runtime.served_models` 为空 | 从 Claude Code 会话记录里取不到模型名，多半是 Claude Code 换了版本、记录格式变了 | 只影响展示，不影响结论。`tests/test_e2e_runtime.py` 会在这种时候变红 |
 | 同一份 skill 结果时好时坏 | 模型本身的随机性 | 调大 `SKILLPRISM_RUNTIME_ITERATIONS` 看每个用例的通过率；代价是 token 成倍 |
 

@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import shutil
 from dataclasses import replace
@@ -26,11 +28,13 @@ from skillprism.skillup import (
     RuntimeProfile,
     RuntimeReady,
     collect_cases,
+    environment_config,
     prepare_case,
     prepare_suite,
     preflight_runtime,
     run_skillup,
     run_timeout,
+    sandbox_ttl,
     subprocess_env,
 )
 from tests.skillup_fake import FakeSkillup, fake_claude
@@ -281,8 +285,9 @@ def test_parallelism_address_and_key_do_not_enter_the_fingerprint(tmp_path):
 def test_run_timeout_scales_with_waves(tmp_path):
     settings = _settings(tmp_path, runtime_parallelism=2, runtime_case_timeout_seconds=100)
     assert run_timeout(settings, 3) == 2 * 100 + 120
+    # 迭代逐轮串行：4 个用例、并发 3，每轮 2 波，3 轮就是 6 波，不是 ceil(12/3)=4。
     settings = _settings(tmp_path, runtime_iterations=3, runtime_parallelism=3)
-    assert run_timeout(settings, 4) == 4 * 300 + 120
+    assert run_timeout(settings, 4) == 6 * 300 + 120
 
 
 # ---- 调用 ----
@@ -399,3 +404,218 @@ def test_fake_really_is_isolated_from_our_environment(tmp_path, ready, monkeypat
     run_skillup(_settings(tmp_path), runtime, tmp_path / "evals.yaml", work, case_count=1)
     assert "SKILLPRISM_CANARY" not in fake.calls[0]["env"]
     assert os.environ["SKILLPRISM_CANARY"] == "1"
+
+
+# ---- OpenSandbox ----
+
+
+def _sandbox(tmp_path: Path, **overrides) -> Settings:
+    values = {
+        "runtime_environment": "opensandbox",
+        "runtime_path": "",
+        "opensandbox_base_url": "https://sandbox.internal/",
+        "opensandbox_api_key": "osb-test",
+        "opensandbox_image": "registry.internal/skill-up/claude:2.1.284",
+        **overrides,
+    }
+    return _settings(tmp_path, **values)
+
+
+def test_the_sandbox_section_is_generated_from_settings(tmp_path, skill):
+    settings = _sandbox(
+        tmp_path,
+        opensandbox_extensions='{"profile":"ci"}',
+        opensandbox_use_server_proxy=True,
+        opensandbox_workspace="/home/agent/ws",
+        opensandbox_entrypoint=["tail", "-f", "/dev/null"],
+        opensandbox_max_sandboxes=3,
+        opensandbox_request_timeout_seconds=900,
+        opensandbox_env="NPM_CONFIG_REGISTRY=https://npm.internal",
+        runtime_context_tokens=128000,
+    )
+    config_path, _ = prepare_suite(skill, settings, RuntimeProfile.from_settings(settings))
+    environment = yaml.safe_load(config_path.read_text())["environment"]
+    assert environment == {
+        "type": "opensandbox",
+        "image": "registry.internal/skill-up/claude:2.1.284",
+        "ready_timeout_seconds": 120,
+        "sandbox_timeout_seconds": 120 + 2 * 300 + 300,
+        "entrypoint": ["tail", "-f", "/dev/null"],
+        "workspace_mount": "/home/agent/ws",
+        "use_server_proxy": True,
+        # 上下文窗口只能从这里进沙箱：worker 子进程的环境过不去。
+        "env": {
+            "NPM_CONFIG_REGISTRY": "https://npm.internal",
+            "CLAUDE_CODE_MAX_CONTEXT_TOKENS": "128000",
+        },
+        "kwargs": {"extensions": '{"profile":"ci"}', "request_timeout_seconds": "900"},
+    }
+    config = yaml.safe_load(config_path.read_text())
+    assert config["cases"]["parallelism"] == 3, "沙箱模式下并发就是沙箱数"
+    text = config_path.read_text()
+    assert "osb-test" not in text and "sandbox.internal" not in text, "服务地址与 key 走环境变量"
+
+
+def test_allow_declared_always_lets_the_agent_reach_the_gateway(tmp_path):
+    """放行名单里没有网关，每个用例都会耗满超时才判 ERROR。"""
+    environment = environment_config(
+        _sandbox(
+            tmp_path,
+            opensandbox_network_policy="allow_declared",
+            opensandbox_allowed_egress="npm.internal, gateway.internal",
+        )
+    )
+    assert environment["network_policy"] == "allow_declared"
+    assert environment["allowed_egress"] == ["gateway.internal", "npm.internal"]
+
+
+def test_the_sandbox_subprocess_env_carries_the_connection_not_the_context(tmp_path, monkeypatch):
+    monkeypatch.setenv("OPENSANDBOX_API_KEY", "someone-elses")
+    env = subprocess_env(
+        _sandbox(tmp_path, runtime_context_tokens=128000, runtime_env="HTTPS_PROXY=http://p:3128"),
+        tmp_path / "home",
+    )
+    assert env == {
+        "PATH": "/usr/local/bin:/usr/bin:/bin",
+        "HOME": str(tmp_path / "home"),
+        "GATEWAY_BASE_URL": "https://gateway.internal/anthropic",
+        "GATEWAY_API_KEY": "k-test",
+        "OPENSANDBOX_BASE_URL": "https://sandbox.internal",
+        "OPENSANDBOX_API_KEY": "osb-test",
+        "HTTPS_PROXY": "http://p:3128",
+    }
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("runtime_env", "OPENSANDBOX_API_KEY=x"),
+        ("runtime_env", "opensandbox_base_url=x"),
+        ("opensandbox_env", "ANTHROPIC_MODEL=x"),
+        ("opensandbox_env", "GATEWAY_API_KEY=x"),
+        ("opensandbox_env", "CLAUDE_CODE_MAX_CONTEXT_TOKENS=1"),
+        ("opensandbox_extensions", "profile=ci"),
+        ("opensandbox_extensions", '["ci"]'),
+        ("opensandbox_extensions", '{"cpu": 2}'),
+        ("opensandbox_base_url", "sandbox.internal"),
+        ("opensandbox_network_policy", "allow_all"),
+        ("opensandbox_sandbox_timeout_seconds", 300),
+        ("opensandbox_max_sandboxes", 0),
+        ("opensandbox_entrypoint", ["tail", " "]),
+        ("runtime_environment", "docker"),
+    ],
+)
+def test_bad_sandbox_settings_fail_at_startup(tmp_path, field, value):
+    with pytest.raises(ValidationError):
+        _sandbox(tmp_path, **{field: value})
+
+
+def test_the_sandbox_ttl_covers_a_case_and_its_judge(tmp_path):
+    assert sandbox_ttl(_sandbox(tmp_path, runtime_case_timeout_seconds=100)) == 120 + 200 + 300
+    assert sandbox_ttl(_sandbox(tmp_path, opensandbox_sandbox_timeout_seconds=3600)) == 3600
+
+
+def test_in_the_sandbox_a_wave_may_take_as_long_as_the_sandbox_lives(tmp_path):
+    settings = _sandbox(
+        tmp_path,
+        runtime_parallelism=8,
+        opensandbox_max_sandboxes=2,
+        opensandbox_sandbox_timeout_seconds=1000,
+    )
+    assert run_timeout(settings, 3) == 2 * 1000 + 120, "波数按沙箱数算，不按本机并发"
+
+
+def test_the_entrypoint_is_read_as_a_json_array(tmp_path, monkeypatch):
+    """env 里只能写字符串；写成 JSON 数组才能原样还原那三项。"""
+    monkeypatch.setenv("SKILLPRISM_OPENSANDBOX_ENTRYPOINT", '["tail","-f","/dev/null"]')
+    monkeypatch.setenv("SKILLPRISM_OPENSANDBOX_MAX_SANDBOXES", "4")
+    settings = Settings(_env_file=None)
+    assert settings.opensandbox_entrypoint == ["tail", "-f", "/dev/null"]
+    assert settings.opensandbox_max_sandboxes == 4
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"runtime_environment": "opensandbox"},
+        {"opensandbox_image": "registry.internal/other:1"},
+        {"opensandbox_network_policy": "deny_all"},
+        {"opensandbox_allowed_egress": "npm.internal"},
+    ],
+)
+def test_where_the_agent_runs_changes_the_fingerprint(tmp_path, change):
+    base = _sandbox(tmp_path) if "runtime_environment" not in change else _settings(tmp_path)
+    changed = _sandbox(tmp_path, **change)
+    assert RuntimeProfile.from_settings(base).fingerprint != RuntimeProfile.from_settings(changed).fingerprint
+
+
+def test_sandbox_connection_details_do_not_enter_the_fingerprint(tmp_path):
+    a = RuntimeProfile.from_settings(_sandbox(tmp_path))
+    b = RuntimeProfile.from_settings(
+        _sandbox(
+            tmp_path,
+            opensandbox_base_url="https://other.internal",
+            opensandbox_api_key="osb-other",
+            opensandbox_extensions='{"profile":"big"}',
+            opensandbox_use_server_proxy=True,
+            opensandbox_ready_timeout_seconds=300,
+            opensandbox_max_sandboxes=5,
+            opensandbox_entrypoint=["sleep", "infinity"],
+        )
+    )
+    assert a.fingerprint == b.fingerprint
+
+
+def test_running_locally_keeps_the_fingerprint_it_had_before_sandboxes(tmp_path):
+    """加沙箱支持之前落的结论，在本机模式下要照常复用。"""
+    material = {
+        "template": 1,
+        "skillup": "0.12.0",
+        "engine": "claude_code",
+        "engine_version": "2.1.284",
+        "model": "deepseek-v4-flash",
+        "judge_model": "judge-model",
+        "iterations": 1,
+        "case_timeout": 300,
+        "max_turns": 12,
+        "context_tokens": None,
+    }
+    blob = json.dumps(material, sort_keys=True, separators=(",", ":")).encode()
+    assert _profile().fingerprint == f"sha256:{hashlib.sha256(blob).hexdigest()}"
+
+
+def test_sandbox_preflight_needs_no_local_claude(tmp_path, ready):
+    fake, _ = ready
+    result = preflight_runtime(_sandbox(tmp_path, skillup_bin=str(fake.path)))
+    assert result.claude_bin is None
+    assert fake.calls[0]["env"]["PATH"] == "/usr/local/bin:/usr/bin:/bin"
+
+
+def test_in_the_sandbox_the_engine_version_may_follow_the_image(tmp_path, skill, ready):
+    """不钉版本就不写 engine.version：写了 skill-up 会在沙箱里现装它。"""
+    fake, _ = ready
+    settings = _sandbox(tmp_path, skillup_bin=str(fake.path), runtime_engine_version="")
+    assert preflight_runtime(settings).claude_bin is None
+
+    profile = RuntimeProfile.from_settings(settings)
+    config_path, _ = prepare_suite(skill, settings, profile)
+    engine = yaml.safe_load(config_path.read_text())["engine"]
+    assert "version" not in engine
+    assert engine["model"] == {"provider": PROVIDER, "name": "deepseek-v4-flash"}
+
+    other_image = RuntimeProfile.from_settings(
+        _sandbox(tmp_path, runtime_engine_version="", opensandbox_image="registry.internal/claude:next")
+    )
+    assert profile.fingerprint != other_image.fingerprint, "版本跟着镜像走，换镜像就是另一种结论"
+
+
+def test_locally_the_engine_version_must_be_pinned(tmp_path, ready):
+    fake, _ = ready
+    with pytest.raises(RuntimePreflightError, match="SKILLPRISM_RUNTIME_ENGINE_VERSION"):
+        preflight_runtime(_settings(tmp_path, skillup_bin=str(fake.path), runtime_engine_version=""))
+
+
+def test_sandbox_preflight_names_missing_sandbox_settings(tmp_path, ready):
+    fake, _ = ready
+    with pytest.raises(RuntimePreflightError, match="SKILLPRISM_OPENSANDBOX_IMAGE"):
+        preflight_runtime(_sandbox(tmp_path, skillup_bin=str(fake.path), opensandbox_image=""))

@@ -434,3 +434,71 @@ def test_a_bundle_task_is_refused(env):
     assert task.state == str(TaskState.FAILED)
     assert "bundle" in task.error
     assert fake.calls == []
+
+
+def test_the_probe_can_be_switched_off(env, monkeypatch):
+    """沙箱里的 agent 连得上网关、worker 自己连不上时，探活只会把每个任务判死。"""
+    _, fake, ready, probe = env
+    probe["failure"] = "模型网关不可达：ConnectError"
+    monkeypatch.setenv("SKILLPRISM_RUNTIME_PROBE_GATEWAY", "false")
+    reset_settings()
+    task_id = _enqueue()
+    _run((get_settings(), fake, ready, probe))
+
+    assert _task(task_id).state == str(TaskState.DONE)
+    assert probe["calls"] == 0
+
+
+def test_an_engine_that_is_not_the_pinned_one_writes_no_result(env, monkeypatch):
+    """沙箱里的版本只有跑完才看得到。对不上还写结论，复用就会把它当成钉住
+    那个版本评出来的。"""
+    _, fake, ready, probe = env
+    monkeypatch.setenv("SKILLPRISM_RUNTIME_ENGINE_VERSION", "2.1.300")
+    reset_settings()
+    task_id = _enqueue()
+    _run((get_settings(), fake, ready, probe))
+
+    task = _task(task_id)
+    assert task.state == str(TaskState.FAILED)
+    assert "2.1.284" in task.error and "2.1.300" in task.error
+    assert _rows() == []
+
+
+def test_following_the_image_records_the_version_it_found(env, monkeypatch):
+    _, fake, _, probe = env
+    for key, value in {
+        "RUNTIME_ENVIRONMENT": "opensandbox",
+        "RUNTIME_ENGINE_VERSION": "",
+        "OPENSANDBOX_BASE_URL": "https://sandbox.internal",
+        "OPENSANDBOX_API_KEY": "osb-test",
+        "OPENSANDBOX_IMAGE": "registry.internal/claude:20260819",
+    }.items():
+        monkeypatch.setenv(f"SKILLPRISM_{key}", value)
+    reset_settings()
+    task_id = _enqueue()
+    _run((get_settings(), fake, RuntimeReady(skillup_bin=str(fake.path), claude_bin=None), probe))
+
+    assert _task(task_id).state == str(TaskState.DONE)
+    [row] = _rows()
+    assert row.engine_version == "2.1.284", "没钉版本时，结论里记的是沙箱里实际用的"
+
+
+def test_a_sandbox_run_lands_its_own_result(env, monkeypatch):
+    _, fake, _, probe = env
+    _enqueue()
+    _run(env)
+    for key, value in {
+        "RUNTIME_ENVIRONMENT": "opensandbox",
+        "OPENSANDBOX_BASE_URL": "https://sandbox.internal",
+        "OPENSANDBOX_API_KEY": "osb-test",
+        "OPENSANDBOX_IMAGE": "registry.internal/claude:2.1.284",
+    }.items():
+        monkeypatch.setenv(f"SKILLPRISM_{key}", value)
+    reset_settings()
+    task_id = _enqueue(force=False)
+    _run((get_settings(), fake, RuntimeReady(skillup_bin=str(fake.path), claude_bin=None), probe))
+
+    assert _task(task_id).state == str(TaskState.DONE)
+    assert fake.commands() == ["validate", "run", "validate", "run"], "换了运行环境不复用本机的结论"
+    assert len(_rows()) == 2
+    assert fake.calls[-1]["env"]["OPENSANDBOX_API_KEY"] == "osb-test"

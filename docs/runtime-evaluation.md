@@ -22,8 +22,8 @@ SkillEvaluator 自带的 Tier 3（harbor + autopilot 生成用例）。
 
 **不做（本期）：**
 
-- **隔离。** agent 直接在 worker 机器上跑（skill-up 的 `environment: none`）。
-  这是一个明确接受的风险，理由和边界见 §10。docker / sandbox 是后续工作。
+- **本机不隔离。** 默认 agent 直接在 worker 机器上跑（skill-up 的 `environment: none`），
+  这是一个明确接受的风险，理由和边界见 §10。有 OpenSandbox 时改在沙箱里跑，见 §14。
 - 一组耦合 skill（`bundle: true`）的实跑：提交时直接拒绝，见 §8.1。
 - 平台自动生成用例：生成用例和判分用的是同一类模型，自己出题自己判，结论没有意义。
 - 有无 skill 对比（skill-up 的 `--baseline`）：token 翻倍，留作可选项，见 §11。
@@ -240,7 +240,9 @@ skill-up run      <skill>/evals/.skillprism-eval.yaml \
 先单独跑一次 `validate`：它失败说明作者的用例写错了，这是**不该重试**的错误，
 要和 `run` 期间的故障分开（§6.3）。
 
-整体超时 = 用例数 × 迭代次数 × 单用例上限 ÷ 并发 + 余量，超时直接杀进程。
+整体超时 = 迭代次数 × ⌈用例数 ÷ 并发⌉ × 单用例上限 + 余量，超时直接杀进程。
+迭代是一轮跑完再跑下一轮的，并发只在一轮之内生效（最初按"用例数 × 迭代次数 ÷ 并发"
+算，迭代多于一轮时会少算，2026-09-29 更正）。
 `--iteration` 默认 1，见 §13 待定项。
 
 ---
@@ -513,9 +515,8 @@ Tier 1 不同，不查扫描器，改为检查：
 
 ## 11. 后续
 
-- **隔离**：docker 运行时的 `network_policy: deny_all` 会连模型也访问不到，
-  `allow_declared` 还没实现。要"只能访问模型网关"，得自己配 docker 网络加出口规则，
-  或者用 opensandbox。
+- **隔离**：OpenSandbox 已支持（§14）。docker 运行时的 `network_policy: deny_all`
+  会连模型也访问不到，`allow_declared` 还没实现，所以本机隔离暂不做。
 - **bundle**：skill-up 支持装多个 skill，但用例怎么组织、结论挂给谁要另外设计。
 - **有无 skill 对比**：`--baseline` 能回答"这个 skill 到底有没有用"（POC：100% 对 22%），
   代价是 token 翻倍。可以作为触发参数按需开。
@@ -571,3 +572,95 @@ Tier 1 不同，不查扫描器，改为检查：
    每个用例多花约 1.6 万 token，结论还有随机性。
 8. 至少写一个"没有这个 skill 就过不了"的用例，否则通过率说明不了 skill 本身
    有没有用。
+
+---
+
+## 14. 在 OpenSandbox 里跑
+
+2026-09-29 加入。`SKILLPRISM_RUNTIME_ENVIRONMENT=opensandbox` 时，生成的 eval.yaml
+用 skill-up 的 `environment: opensandbox`，其余流程（§3）不变。部署见
+[deployment.md 的"在 OpenSandbox 里跑"](deployment.md#在-opensandbox-里跑)。
+
+### 14.1 skill-up 在沙箱里做什么
+
+读 skill-up v0.12.0 的源码得到（`internal/runtime/opensandbox.go`、
+`internal/evaluator/evaluator.go`，v0.12.0 以后这部分没变）：
+
+- **每个用例一个沙箱**，并发就是同时存在的沙箱数。建好后依次：`setup_steps`、
+  装 agent、装 skill、传 fixture、跑 agent、判分、下载产物、销毁。
+- **`script` 和 `agent_judge` 也在同一个沙箱里跑。** 作者的判分脚本不再在
+  worker 上执行（§10 的第三条随之消失）。
+- **装 Claude Code：** 写了 `engine.version` 时，先看 `claude --version` 是否等于它，
+  是就直接用；否则用 nvm 装 Node、`npm install -g @anthropic-ai/claude-code@<版本>`，
+  要能访问 GitHub、nodejs.org 和 npm 源。没写时，沙箱里有 `claude` 就直接用。
+  所以镜像应当预装，平台默认不钉版本、跟着镜像走（§14.3）。
+- **凭据：** skill-up 在 worker 上按 provider 解析 `GATEWAY_*`，再以 `ANTHROPIC_*`
+  注入沙箱里的命令。沙箱里的命令只看得到 `environment.env` 与 skill-up 自己给的
+  变量，**看不到 worker 子进程的环境**。
+- 服务地址与 key 分别读 `OPENSANDBOX_BASE_URL`、`OPENSANDBOX_API_KEY`。
+
+### 14.2 平台因此改了什么
+
+| 地方 | 本机（`none`） | OpenSandbox |
+| --- | --- | --- |
+| `environment` 段 | `{type: none}` | 镜像、就绪等待、存活上限、扩展参数、出网策略等，全部来自配置 |
+| 子进程环境（§5.3） | 白名单 | 白名单 + `OPENSANDBOX_BASE_URL` / `_API_KEY`；上下文窗口改写进 `environment.env` |
+| 预检（§9） | skill-up 与本机 claude 的版本 | 只查 skill-up；本机不需要 claude |
+| 引擎版本 | 必须钉，预检时核对 | 可以不钉（推荐）：不写 `engine.version`，用镜像里的，镜像进指纹代表它，结论记下实际版本。钉了则跑完核对，不一致任务失败、不写结论 |
+| 用例并发 | `SKILLPRISM_RUNTIME_PARALLELISM` | `SKILLPRISM_OPENSANDBOX_MAX_SANDBOXES`（默认 2）：每个并发槽位就是一个沙箱 |
+| 整体超时（§5.4） | 每波 = 单用例上限 | 每波 = 沙箱存活上限：建沙箱、装 agent 都算在用例头上 |
+| 网关探活（§6.4） | 照做 | 默认照做；worker 连不上网关时可关（`SKILLPRISM_RUNTIME_PROBE_GATEWAY=false`） |
+
+`SKILLPRISM_OPENSANDBOX_ENV` 不许设 `ANTHROPIC_*`、`GATEWAY_*`、`CLAUDE_CODE_*`：
+`ANTHROPIC_MODEL` 这类 skill-up 自己不设的键会直接生效，结论换了模型，指纹却没变。
+
+**沙箱存活上限**默认 = 就绪等待 + 2 × 单用例上限（agent 一次、`agent_judge` 一次）
++ 300 秒。它是真正的兜底：worker 超时会直接杀掉 skill-up，来不及销毁的沙箱靠它回收。
+
+**`allow_declared` 时网关主机自动放行。** 放行名单里没有网关，每个用例都会耗满
+超时才判 ERROR，和 §6.4 是同一类白等。
+
+### 14.3 指纹
+
+运行环境不是 `none` 时，指纹原料多一项
+`environment = {type, image, network_policy, extra_egress}`：镜像决定了 agent 手边
+有哪些工具，出网策略决定了 skill 能不能联网，都会改变结论。服务地址、key、
+扩展参数、超时、server proxy 只决定沙箱建在哪儿、多快，不进来。
+
+`none` 时原料**不加这一项**，指纹和加入沙箱支持之前逐字节一致，已有结论照常复用
+（有测试钉住）。
+
+**Claude Code 版本跟着镜像走。** 本机模式下 claude 是运维装的，只能靠钉版本来代表它；
+沙箱模式下镜像已经在指纹里，镜像定了 claude 就定了，再钉一个版本号是重复配置——
+公司更新镜像时还得同步改它，忘了改的表现是每个任务都失败。所以沙箱模式下
+`SKILLPRISM_RUNTIME_ENGINE_VERSION` 可以留空，此时指纹里的 `engine_version` 是空串，
+结论的 `engine_version` 列记下 skill-up 探测到的实际版本。代价是依赖镜像 tag
+不可变：同一个 tag 被覆盖推送时指纹不变，只能从结论里的实际版本发现漂移，
+用 `force=true` 重跑。
+
+### 14.4 隔离之后还剩什么
+
+- agent 仍然拿得到模型 key（要调模型就得给它）。key 专用、设额度照做。
+- 默认出网策略由 OpenSandbox 服务端决定。要"只能访问模型网关"就设
+  `allow_declared`，前提是公司的 OpenSandbox 支持出网规则。
+- 报告仍在本地文件系统，sandbox worker 仍要和 API 同机（§10）；但 worker 上
+  已经不跑作者的东西了，同机不再是隔离问题。
+
+### 14.5 验证过什么
+
+本机连不上公司的 OpenSandbox，所以验证到这一步为止：
+
+- 用公司环境里 skill-up 命令行跑通的那份 `environment` 配置（镜像、`use_server_proxy`、
+  `entrypoint`、`request_timeout_seconds`）换成平台配置项，生成的 eval.yaml 与它等价，
+  过了 `validate`。服务地址改由 `OPENSANDBOX_BASE_URL` 给，skill-up 在
+  `kwargs.base_url` 缺省时读它。
+- 生成的三种 eval.yaml（出网策略空 / `deny_all` / `allow_declared`）都过了
+  skill-up v0.12.0 的 `validate`。
+- 服务地址连不上时，skill-up 1 秒内把每个用例判 ERROR（`failed to create
+  opensandbox: … connection refused`），平台按"全部用例都没被判定"重新排队，
+  错误原文带出。
+
+**还没验证的：** 在真实沙箱里跑通、用的镜像是否预装了对应版本的 Claude Code、
+`report.html` 与 transcript 的下载路径和本机模式一致（adapter 读的位置）。上线前
+在公司环境里跑一次 deployment.md 的"验证"。
+

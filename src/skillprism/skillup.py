@@ -14,6 +14,10 @@
   "相对 skill 根"写的 fixture 路径原样可用。
 - **``agent_judge`` 用例不写 ``judge.model`` 校验不过**，而 judge 模型本来就该
   由平台定，所以拷进来时统一改写。
+
+agent 可以跑在 worker 本机（``environment: none``），也可以跑在 OpenSandbox 里
+（每个用例一个沙箱）。两者只在生成的 ``environment`` 段、子进程环境与预检上
+不同，见 docs/runtime-evaluation.md §14。
 """
 
 from __future__ import annotations
@@ -28,6 +32,7 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 import yaml
@@ -66,6 +71,14 @@ RUN_TIMEOUT_MARGIN_SECONDS = 120
 
 VALIDATE_TIMEOUT_SECONDS = 60
 
+#: OpenSandbox 下子进程 PATH 的默认值。worker 上的 skill-up 不再需要找 claude，
+#: 只要一个能跑的 PATH。
+_SANDBOX_HOST_PATH = "/usr/local/bin:/usr/bin:/bin"
+
+#: 自动算沙箱存活上限时，在"就绪等待 + 两个单用例上限"（agent 一次、
+#: agent_judge 一次）之外的余量：装 Claude Code、传 fixture、下载产物。
+SANDBOX_TTL_MARGIN_SECONDS = 300
+
 
 class CaseError(ValueError):
     """作者的用例有问题。重试多少次都一样，任务直接结束，信息要能转给作者。"""
@@ -84,6 +97,8 @@ class RuntimeProfile:
     """一次运行时评测的执行配置。它的指纹进结论身份，见 :attr:`fingerprint`。"""
 
     skillup_version: str
+    #: 钉住的 Claude Code 版本。沙箱模式下可以为空：用镜像里装的那个，
+    #: 由镜像进指纹来管住它（见 :attr:`fingerprint`）。
     engine_version: str
     model: str
     judge_model: str
@@ -93,6 +108,12 @@ class RuntimeProfile:
     context_tokens: int | None
 
     engine: str = ENGINE
+    #: agent 在哪儿跑。``none`` 之外的取值连同下面三项进指纹。
+    environment: str = "none"
+    sandbox_image: str = ""
+    network_policy: str = ""
+    #: 平台额外放行的出网目标（不含自动放行的网关主机，理由同 base_url）。
+    extra_egress: tuple[str, ...] = ()
 
     @classmethod
     def from_settings(cls, settings: Settings) -> RuntimeProfile:
@@ -105,6 +126,10 @@ class RuntimeProfile:
             case_timeout_seconds=settings.runtime_case_timeout_seconds,
             max_turns=settings.runtime_max_turns,
             context_tokens=settings.runtime_context_tokens,
+            environment=settings.runtime_environment,
+            sandbox_image=settings.opensandbox_image,
+            network_policy=settings.opensandbox_network_policy,
+            extra_egress=tuple(sorted(settings.opensandbox_egress())),
         )
 
     @property
@@ -114,6 +139,16 @@ class RuntimeProfile:
         **不进来的：** 网关地址（换地址不该让所有结论失效，换了后端就该换模型名）、
         并发（只影响快慢）、key。网关背后的实际模型版本也不在里面——跑之前
         拿不到，只能事后记下来（``served_models``），漂移了靠 force 重跑。
+        OpenSandbox 的服务地址、扩展参数、超时同理不进来：它们决定沙箱建在
+        哪儿、多快，不决定 agent 手边有什么。
+
+        ``environment`` 只在不是 ``none`` 时才进原料，这样本机运行的指纹与
+        加入沙箱支持之前完全一样，已有的结论照常复用。
+
+        沙箱模式下不钉 Claude Code 版本时，``engine_version`` 是空串，版本由
+        镜像代表：镜像换了指纹就变。前提是镜像 tag 不可变——同一个 tag 重新
+        推一个装了别的版本的镜像，这里看不出来，只能从结论里记下的实际版本
+        发现。
         """
         material = {
             "template": TEMPLATE_VERSION,
@@ -127,6 +162,13 @@ class RuntimeProfile:
             "max_turns": self.max_turns,
             "context_tokens": self.context_tokens,
         }
+        if self.environment != "none":
+            material["environment"] = {
+                "type": self.environment,
+                "image": self.sandbox_image,
+                "network_policy": self.network_policy,
+                "extra_egress": list(self.extra_egress),
+            }
         blob = json.dumps(material, sort_keys=True, separators=(",", ":")).encode("utf-8")
         return f"sha256:{hashlib.sha256(blob).hexdigest()}"
 
@@ -140,16 +182,36 @@ class RuntimeReady:
     """预检通过后的可执行文件位置。"""
 
     skillup_bin: str
-    claude_bin: str
+    #: 本机的 claude。agent 跑在沙箱里时为 None：那边的版本由 skill-up 按
+    #: ``engine.version`` 核对或安装，跑完再对一次（runtime_worker）。
+    claude_bin: str | None
 
 
 _REQUIRED_SETTINGS = (
-    ("runtime_path", "SKILLPRISM_RUNTIME_PATH"),
-    ("runtime_engine_version", "SKILLPRISM_RUNTIME_ENGINE_VERSION"),
     ("runtime_base_url", "SKILLPRISM_RUNTIME_BASE_URL"),
     ("runtime_api_key", "SKILLPRISM_RUNTIME_API_KEY"),
     ("runtime_model", "SKILLPRISM_RUNTIME_MODEL"),
 )
+
+_REQUIRED_BY_ENVIRONMENT = {
+    "none": (
+        ("runtime_path", "SKILLPRISM_RUNTIME_PATH"),
+        # 本机的 claude 是运维装的，版本不钉就没有东西代表它。
+        ("runtime_engine_version", "SKILLPRISM_RUNTIME_ENGINE_VERSION"),
+    ),
+    "opensandbox": (
+        ("opensandbox_base_url", "SKILLPRISM_OPENSANDBOX_BASE_URL"),
+        ("opensandbox_api_key", "SKILLPRISM_OPENSANDBOX_API_KEY"),
+        ("opensandbox_image", "SKILLPRISM_OPENSANDBOX_IMAGE"),
+    ),
+}
+
+
+def host_path(settings: Settings) -> str:
+    """评测子进程（worker 上的 skill-up）的 PATH。"""
+    if settings.runtime_path:
+        return settings.runtime_path
+    return _SANDBOX_HOST_PATH
 
 
 def _version_of(binary: str, env: dict[str, str]) -> str | None:
@@ -184,32 +246,35 @@ def preflight_runtime(settings: Settings) -> RuntimeReady:
     版本必须和配置**精确相等**，不是"能跑就行"：两者都进运行时指纹。机器上
     换了版本而配置没跟着改，复用就会把新版本评出来的东西当成旧版本的结论。
     """
-    missing = [env for attr, env in _REQUIRED_SETTINGS if not getattr(settings, attr)]
+    required = _REQUIRED_SETTINGS + _REQUIRED_BY_ENVIRONMENT[settings.runtime_environment]
+    missing = [env for attr, env in required if not getattr(settings, attr)]
     if missing:
         raise RuntimePreflightError(f"运行时评测缺少配置：{'、'.join(missing)}")
 
-    skillup = shutil.which(settings.skillup_bin) or shutil.which(
-        settings.skillup_bin, path=settings.runtime_path
-    )
+    path = host_path(settings)
+    skillup = shutil.which(settings.skillup_bin) or shutil.which(settings.skillup_bin, path=path)
     if skillup is None:
         raise RuntimePreflightError(f"找不到 skill-up 可执行文件：{settings.skillup_bin}")
+
+    with tempfile.TemporaryDirectory(prefix="skillprism-preflight-") as home:
+        skillup_version = _version_of(skillup, {"PATH": path, "HOME": home})
+    if skillup_version != settings.skillup_version:
+        raise RuntimePreflightError(
+            f"skill-up 版本是 {skillup_version or '未知'}，配置钉的是 "
+            f"{settings.skillup_version}（SKILLPRISM_SKILLUP_VERSION）"
+        )
+
+    if settings.runtime_environment != "none":
+        # 沙箱在每个用例开始时才建，这里摸不到。本机有没有 claude 无关紧要。
+        return RuntimeReady(skillup_bin=skillup, claude_bin=None)
 
     claude = shutil.which("claude", path=settings.runtime_path)
     if claude is None:
         raise RuntimePreflightError(
             f"SKILLPRISM_RUNTIME_PATH 里找不到 claude：{settings.runtime_path}"
         )
-
     with tempfile.TemporaryDirectory(prefix="skillprism-preflight-") as home:
-        env = {"PATH": settings.runtime_path, "HOME": home}
-        skillup_version = _version_of(skillup, env)
-        engine_version = _version_of(claude, env)
-
-    if skillup_version != settings.skillup_version:
-        raise RuntimePreflightError(
-            f"skill-up 版本是 {skillup_version or '未知'}，配置钉的是 "
-            f"{settings.skillup_version}（SKILLPRISM_SKILLUP_VERSION）"
-        )
+        engine_version = _version_of(claude, {"PATH": settings.runtime_path, "HOME": home})
     if engine_version != settings.runtime_engine_version:
         raise RuntimePreflightError(
             f"claude 版本是 {engine_version or '未知'}，配置钉的是 "
@@ -290,28 +355,90 @@ def prepare_case(path: Path, profile: RuntimeProfile) -> None:
     )
 
 
-def eval_config(cases: list[str], profile: RuntimeProfile, *, parallelism: int) -> dict[str, Any]:
+def sandbox_ttl(settings: Settings) -> int:
+    """沙箱的存活上限（秒）。配了就用配的，否则按单用例上限算。
+
+    一个用例在沙箱里依次经历：就绪、装 Claude Code、传 skill 与 fixture、
+    agent（≤ 单用例上限）、agent_judge（同样是一次 agent 运行）、下载产物。
+    """
+    if settings.opensandbox_sandbox_timeout_seconds:
+        return settings.opensandbox_sandbox_timeout_seconds
+    return (
+        settings.opensandbox_ready_timeout_seconds
+        + 2 * settings.runtime_case_timeout_seconds
+        + SANDBOX_TTL_MARGIN_SECONDS
+    )
+
+
+def environment_config(settings: Settings) -> dict[str, Any]:
+    """eval.yaml 的 ``environment`` 段。
+
+    OpenSandbox 的服务地址与 key 不在这里，走环境变量（:func:`subprocess_env`）。
+    沙箱里的命令只看得到这里的 ``env`` 与 skill-up 自己给的变量，worker 子进程
+    的环境过不去，所以上下文窗口在沙箱模式下要写进这里。
+    """
+    if settings.runtime_environment == "none":
+        return {"type": "none"}
+
+    env = settings.opensandbox_env_pairs()
+    if settings.runtime_context_tokens:
+        env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] = str(settings.runtime_context_tokens)
+
+    kwargs: dict[str, str] = {}
+    if settings.opensandbox_extensions:
+        kwargs["extensions"] = settings.opensandbox_extensions
+    if settings.opensandbox_request_timeout_seconds:
+        kwargs["request_timeout_seconds"] = str(settings.opensandbox_request_timeout_seconds)
+
+    section: dict[str, Any] = {
+        "type": "opensandbox",
+        "image": settings.opensandbox_image,
+        "ready_timeout_seconds": settings.opensandbox_ready_timeout_seconds,
+        "sandbox_timeout_seconds": sandbox_ttl(settings),
+    }
+    if settings.opensandbox_entrypoint:
+        section["entrypoint"] = list(settings.opensandbox_entrypoint)
+    if settings.opensandbox_workspace:
+        section["workspace_mount"] = settings.opensandbox_workspace
+    if settings.opensandbox_use_server_proxy:
+        section["use_server_proxy"] = True
+    if env:
+        section["env"] = env
+    if kwargs:
+        section["kwargs"] = kwargs
+    if settings.opensandbox_network_policy:
+        section["network_policy"] = settings.opensandbox_network_policy
+    if settings.opensandbox_network_policy == "allow_declared":
+        # 先决条件：agent 得连得上模型网关，否则每个用例都耗满超时才判 ERROR。
+        gateway = urlsplit(settings.runtime_base_url).hostname
+        egress = [gateway] if gateway else []
+        section["allowed_egress"] = egress + [t for t in settings.opensandbox_egress() if t not in egress]
+    return section
+
+
+def eval_config(settings: Settings, cases: list[str], profile: RuntimeProfile) -> dict[str, Any]:
     """平台生成的 eval.yaml 内容。
 
     ``skills`` 显式写出，不靠 skill-up"找到 SKILL.md 就自动装"。网关地址和
     key 不在这里：它们走环境变量（:func:`subprocess_env`），不落盘。
     """
+    engine: dict[str, Any] = {"name": profile.engine}
+    if profile.engine_version:
+        # 写了它，skill-up 在沙箱里发现版本不符就会现装；不写就用镜像里的。
+        engine["version"] = profile.engine_version
+    engine["model"] = {"provider": PROVIDER, "name": profile.model}
     return {
         "schema_version": "v1alpha1",
-        "environment": {"type": "none"},
+        "environment": environment_config(settings),
         "skills": [{"source": "local_path", "path": "."}],
-        "engine": {
-            "name": profile.engine,
-            "version": profile.engine_version,
-            "model": {"provider": PROVIDER, "name": profile.model},
-        },
+        "engine": engine,
         "cases": {
             "files": list(cases),
             "defaults": {
                 "timeout_seconds": profile.case_timeout_seconds,
                 "max_turns": profile.max_turns,
             },
-            "parallelism": parallelism,
+            "parallelism": settings.case_parallelism,
         },
     }
 
@@ -327,7 +454,7 @@ def prepare_suite(skill_root: Path, settings: Settings, profile: RuntimeProfile)
     config_path = skill_root.joinpath("evals", EVAL_CONFIG_NAME)
     config_path.write_text(
         yaml.safe_dump(
-            eval_config(cases, profile, parallelism=settings.runtime_parallelism),
+            eval_config(settings, cases, profile),
             sort_keys=False,
             allow_unicode=True,
         ),
@@ -349,15 +476,22 @@ def subprocess_env(settings: Settings, home: Path) -> dict[str, str]:
 
     HOME 是本次任务专用的：共用 HOME 下 ``~/.claude`` 里的用户级 skills、
     CLAUDE.md、settings 都会被 agent 加载；``~/.config/skill-up`` 也会被
-    skill-up 读进去。
+    skill-up 读进去（它的 ``runtime_kwargs.opensandbox`` 能改沙箱参数）。
+
+    沙箱模式下网关的地址与 key 照样给这里：skill-up 在 worker 上解析 provider，
+    再以 ``ANTHROPIC_*`` 注入沙箱里的命令。上下文窗口则改走 eval.yaml
+    （:func:`environment_config`），这里给了沙箱也看不到。
     """
     env = {
-        "PATH": settings.runtime_path,
+        "PATH": host_path(settings),
         "HOME": str(home),
         f"{_PROVIDER_ENV}_BASE_URL": settings.runtime_base_url,
         f"{_PROVIDER_ENV}_API_KEY": settings.runtime_api_key,
     }
-    if settings.runtime_context_tokens:
+    if settings.runtime_environment == "opensandbox":
+        env["OPENSANDBOX_BASE_URL"] = settings.opensandbox_base_url
+        env["OPENSANDBOX_API_KEY"] = settings.opensandbox_api_key
+    elif settings.runtime_context_tokens:
         env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] = str(settings.runtime_context_tokens)
     # 与 SCANNER_ENV 同理放在最后；会碰上面几项的键在配置校验时就拒了。
     env.update(settings.runtime_env_pairs())
@@ -411,9 +545,20 @@ class SkillupRun:
 
 
 def run_timeout(settings: Settings, case_count: int) -> int:
-    """整体超时：按并发分几波跑完，每波最长一个单用例上限，再加余量。"""
-    waves = math.ceil(case_count * settings.runtime_iterations / settings.runtime_parallelism)
-    return waves * settings.runtime_case_timeout_seconds + RUN_TIMEOUT_MARGIN_SECONDS
+    """整体超时：按并发分几波跑完，每波最长一个单用例上限，再加余量。
+
+    迭代是**一轮跑完再跑下一轮**的（skill-up runner 逐轮调 EvaluatePlan），
+    并发只在一轮之内生效，所以波数是"每轮的波数 × 轮数"，不能把各轮的用例
+    摊在一起除。
+
+    沙箱模式下每波的上限换成沙箱的存活上限：建沙箱、装 Claude Code 都算在
+    用例头上，而一个用例不可能活得比它的沙箱久。
+    """
+    waves = settings.runtime_iterations * math.ceil(case_count / settings.case_parallelism)
+    per_wave = settings.runtime_case_timeout_seconds
+    if settings.runtime_environment == "opensandbox":
+        per_wave = sandbox_ttl(settings)
+    return waves * per_wave + RUN_TIMEOUT_MARGIN_SECONDS
 
 
 def _tail(text: str, work_dir: Path, lines: int = 20) -> str:
