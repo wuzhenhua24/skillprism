@@ -16,17 +16,22 @@ from skillprism import queue as task_queue
 from skillprism.content import join_skill_id, validate_ref
 from skillprism.domain import ContentSource, EvaluationStatus, Tier
 from skillprism.materialize import MaterializeError, safe_relative_path
-from skillprism.models import EvaluationResult, EvaluationTask
+from skillprism.models import EvaluationResult, EvaluationTask, RuntimeResult
 from skillprism.repository import (
     ANY_CONTEXT,
     bundle_member_results,
     find_result,
+    find_runtime_result,
     latest_result,
+    latest_runtime_result,
     result_to_dto,
+    runtime_result_to_dto,
+    runtime_tier_summary,
 )
 from skillprism.schemas import (
     EvaluationDTO,
     GitLabSubmitRequest,
+    RuntimeEvaluationDTO,
     SubmitRequest,
     SubmitResponse,
     TaskDTO,
@@ -250,7 +255,68 @@ def get_evaluation(
     )
     if row is None:
         return None
-    return result_to_dto(row, report_url=report_url_for(row, public_base_url))
+    dto = result_to_dto(row, report_url=report_url_for(row, public_base_url))
+    # 预留的 tier3 分区：同一份内容最近的一条运行时结论的摘要。只对单独评的
+    # 结论填——运行时评测本期不支持 bundle，成员结论的上下文和它对不上。
+    # 明细与成本不在这里，在 /runtime-evaluation。
+    if row.context_hash is None:
+        runtime = find_runtime_result(session, source, row.skill_id, row.content_hash)
+        if runtime is not None:
+            dto.tiers.tier3 = runtime_tier_summary(runtime)
+    return dto
+
+
+def lookup_runtime_result(
+    session: Session,
+    source: ContentSource,
+    skill_id: str,
+    *,
+    content_hash: str | None = None,
+    fingerprint: str | None = None,
+) -> RuntimeResult | None:
+    """定位一条运行时结论。结论与报告两个端点共用，理由同 :func:`lookup_result`。
+
+    不带 ``content_hash`` 退回这个 skill 最近的一条，在 GitLab 接入下多半不是
+    你要的；带了但不带 ``fingerprint`` 退回这份内容最近的一条——同一份内容
+    换个模型评过就有两条。任务接口 ``results[]`` 里两个值都有，原样回传。
+    """
+    if content_hash:
+        return find_runtime_result(
+            session, source, skill_id, content_hash, fingerprint=fingerprint
+        )
+    return latest_runtime_result(session, source, skill_id)
+
+
+def runtime_report_url_for(row: RuntimeResult, public_base_url: str) -> str | None:
+    """运行时报告的公开地址。钉住 source、content_hash 与指纹，理由同 :func:`report_url_for`。"""
+    if not public_base_url or not row.report_html_uri:
+        return None
+    path = quote(row.skill_id, safe="/:")
+    query = urlencode(
+        {
+            "source": row.source,
+            "content_hash": row.content_hash,
+            "fingerprint": row.runtime_fingerprint,
+        }
+    )
+    return f"{public_base_url.rstrip('/')}/api/skills/{path}/runtime-report?{query}"
+
+
+def get_runtime_evaluation(
+    session: Session,
+    source: ContentSource,
+    skill_id: str,
+    *,
+    content_hash: str | None = None,
+    fingerprint: str | None = None,
+    public_base_url: str = "",
+) -> RuntimeEvaluationDTO | None:
+    row = lookup_runtime_result(
+        session, source, skill_id, content_hash=content_hash, fingerprint=fingerprint
+    )
+    if row is None:
+        return None
+    return runtime_result_to_dto(row, report_url=runtime_report_url_for(row, public_base_url))
 
 
 def task_results(
@@ -281,6 +347,22 @@ def task_results(
         # 库里存了个无法识别的来源。诊断接口不该因此 500：任务本身照常回显，
         # 结论查不了就是查不了（worker 也会让这种任务带着原因作废）。
         return []
+
+    if task.tier == str(Tier.TIER3):
+        # 运行时结论在另一张表。任务行上没记指纹，取这份内容最近的一条——
+        # 任务刚跑完时那就是它写的（或复用克隆出来的）那条。
+        runtime = find_runtime_result(session, source, task.skill_id, task.content_hash)
+        if runtime is None:
+            return []
+        return [
+            TaskResultRef(
+                skill_id=runtime.skill_id,
+                content_hash=runtime.content_hash,
+                runtime_fingerprint=runtime.runtime_fingerprint,
+                status=EvaluationStatus(runtime.status),
+                report_url=runtime_report_url_for(runtime, public_base_url),
+            )
+        ]
 
     if task.bundle:
         rows = bundle_member_results(session, source, task.skill_id, task.content_hash)
@@ -346,6 +428,6 @@ def report_path(uri: str | None) -> Path | None:
     return path if path.exists() else None
 
 
-#: Tier 2/3 尚未实现。这里显式列出以便 API 返回明确的“未实现”，
-#: 而不是静默当成 Tier 1 处理。
-IMPLEMENTED_TIERS = {Tier.TIER1}
+#: 已实现的层级。这里显式列出以便 API 对 Tier 2 返回明确的“未实现”，
+#: 而不是静默当成 Tier 1 处理。Tier 3 见 docs/runtime-evaluation.md。
+IMPLEMENTED_TIERS = {Tier.TIER1, Tier.TIER3}

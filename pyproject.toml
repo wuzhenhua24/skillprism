@@ -45,5 +45,5 @@ where = ["src"]
 testpaths = ["tests"]
 asyncio_mode = "auto"
 markers = [
-    "e2e: 端到端集成测试，需要 skillevaluator CLI 与外部扫描器（缺失时自动跳过）",
+    "e2e: 端到端集成测试，需要 skillevaluator CLI 与外部扫描器，或 skill-up + claude + 模型网关（缺失时自动跳过）",
 ]

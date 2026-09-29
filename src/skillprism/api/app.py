@@ -14,7 +14,7 @@ from skillprism import service
 from skillprism.config import get_settings
 from skillprism.content import SkillNotFoundError, enabled_sources
 from skillprism.db import SCHEMA_NOT_READY_HINT, get_session_factory, schema_is_ready
-from skillprism.domain import ContentSource
+from skillprism.domain import ContentSource, Tier
 from skillprism.embedding_shim import router as embedding_shim_router
 from skillprism.materialize import MaterializeError, UnsafePathError
 from skillprism.models import EvaluationTask
@@ -23,6 +23,7 @@ from skillprism.runner import preflight
 from skillprism.schemas import (
     EvaluationDTO,
     GitLabSubmitRequest,
+    RuntimeEvaluationDTO,
     SubmitRequest,
     SubmitResponse,
     TaskDTO,
@@ -38,7 +39,7 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(
     title="SkillPrism",
-    description="基于 SkillEvaluator 的 Tier 1 评测编排与结果服务",
+    description="skill 评测编排与结果服务：Tier 1 静态检查（SkillEvaluator）与 Tier 3 运行时评测（skill-up）",
     version="0.1.0",
     lifespan=lifespan,
 )
@@ -139,7 +140,14 @@ def _accept(
     把它长成一个同步的 4xx 会让调用方以为是自己请求错了。
     """
     if request.tier not in service.IMPLEMENTED_TIERS:
-        raise HTTPException(status_code=501, detail=f"{request.tier} 尚未实现，当前仅支持 tier1")
+        supported = "、".join(sorted(str(t) for t in service.IMPLEMENTED_TIERS))
+        raise HTTPException(
+            status_code=501, detail=f"{request.tier} 尚未实现，当前支持 {supported}"
+        )
+    if request.tier is Tier.TIER3 and request.bundle:
+        # 一组 skill 的用例怎么组织、结论挂给谁还没设计。收下再让 worker 失败
+        # 也行，但那是一条十秒后才看得到的错误，而这里当场就能说清楚。
+        raise HTTPException(status_code=422, detail="运行时评测（tier3）暂不支持 bundle")
     try:
         return service.submit(session, request, source=source)
     except (UnsafePathError, MaterializeError) as exc:
@@ -361,5 +369,61 @@ def get_report(
     path = service.report_path(row.report_html_uri) if row else None
     if path is None:
         detail = "报告不存在" if row else _no_result_detail(session, kind, content_hash)
+        raise HTTPException(status_code=404, detail=detail)
+    return FileResponse(path, media_type="text/html", headers=REPORT_SECURITY_HEADERS)
+
+
+@app.get(
+    "/api/skills/{skill_id:path}/runtime-evaluation", response_model=RuntimeEvaluationDTO
+)
+def get_runtime_evaluation(
+    skill_id: str,
+    source: str | None = None,
+    content_hash: str | None = None,
+    fingerprint: str | None = None,
+    session: Session = Depends(get_db),
+) -> RuntimeEvaluationDTO:
+    """取一条运行时评测（Tier 3）结论。设计见 docs/runtime-evaluation.md。
+
+    ``source`` 同 ``/evaluation``。``content_hash`` 与 ``fingerprint`` 从任务接口
+    ``results[]`` 里原样拿：同一份内容在两套执行配置（例如换了模型）下评过就有
+    两条结论，只带 ``content_hash`` 取到的是最近的那条。
+    """
+    kind = query_source(source)
+    dto = service.get_runtime_evaluation(
+        session,
+        kind,
+        skill_id,
+        content_hash=content_hash,
+        fingerprint=fingerprint,
+        public_base_url=get_settings().public_base_url,
+    )
+    if dto is None:
+        raise HTTPException(status_code=404, detail="该 skill 没有对应的运行时评测结果")
+    return dto
+
+
+@app.get("/api/skills/{skill_id:path}/runtime-report")
+def get_runtime_report(
+    skill_id: str,
+    source: str | None = None,
+    content_hash: str | None = None,
+    fingerprint: str | None = None,
+    session: Session = Depends(get_db),
+) -> FileResponse:
+    """回传 skill-up 生成的 HTML 报告。
+
+    和 Tier 1 的报告一样是自生成 HTML、源头是用户写的内容（这里还多了用例的
+    prompt 与 agent 的完整回复），同样只在独立域名下、带
+    :data:`REPORT_SECURITY_HEADERS` 提供。三个参数与 ``/runtime-evaluation``
+    同义，两边必须一起带。
+    """
+    kind = query_source(source)
+    row = service.lookup_runtime_result(
+        session, kind, skill_id, content_hash=content_hash, fingerprint=fingerprint
+    )
+    path = service.report_path(row.report_html_uri) if row else None
+    if path is None:
+        detail = "报告不存在" if row else "该 skill 没有对应的运行时评测结果"
         raise HTTPException(status_code=404, detail=detail)
     return FileResponse(path, media_type="text/html", headers=REPORT_SECURITY_HEADERS)

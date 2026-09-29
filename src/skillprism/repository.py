@@ -10,11 +10,14 @@ from sqlalchemy.orm import Session
 
 from skillprism.content import member_skill_id
 from skillprism.domain import ContentSource, EvaluationStatus, Severity, Tier
-from skillprism.models import EvaluationDetail, EvaluationResult
+from skillprism.models import EvaluationDetail, EvaluationResult, RuntimeResult
 from skillprism.schemas import (
     EvaluationDTO,
     EvaluatorInfo,
     Finding,
+    RuntimeCaseResult,
+    RuntimeEvaluationDTO,
+    RuntimeInfo,
     TierBundle,
     TierResult,
     ValidatorOutcome,
@@ -433,3 +436,210 @@ def result_to_dto(row: EvaluationResult, *, report_url: str | None = None) -> Ev
         report_url=report_url,
         error=row.error,
     )
+
+
+# ---------------------------------------------------------------------------
+# 运行时评测（Tier 3）。独立一张表，理由见 models.RuntimeResult。
+
+
+def find_runtime_result(
+    session: Session,
+    source: ContentSource,
+    skill_id: str,
+    content_hash: str,
+    *,
+    fingerprint: str | None = None,
+) -> RuntimeResult | None:
+    """定位一条运行时结论。身份是 **(来源, skill_id, content_hash, 指纹)**。
+
+    给了指纹就精确取；不给就取这份内容最近评完的一条——同一份内容换个模型
+    评过就有多条，那时"最近的"未必是调用方要的，和 Tier 1 不带
+    ``context_hash`` 是同一种退化。
+    """
+    stmt = select(RuntimeResult).where(
+        RuntimeResult.source == str(source),
+        RuntimeResult.skill_id == skill_id,
+        RuntimeResult.content_hash == content_hash,
+    )
+    if fingerprint is not None:
+        return session.execute(
+            stmt.where(RuntimeResult.runtime_fingerprint == fingerprint)
+        ).scalar_one_or_none()
+    return session.execute(
+        stmt.order_by(RuntimeResult.evaluated_at.desc()).limit(1)
+    ).scalars().first()
+
+
+def latest_runtime_result(
+    session: Session, source: ContentSource, skill_id: str
+) -> RuntimeResult | None:
+    """这个 skill 最近评完的一条运行时结论，不限内容。"""
+    stmt = (
+        select(RuntimeResult)
+        .where(RuntimeResult.source == str(source), RuntimeResult.skill_id == skill_id)
+        .order_by(RuntimeResult.evaluated_at.desc())
+        .limit(1)
+    )
+    return session.execute(stmt).scalars().first()
+
+
+def find_reusable_runtime_result(
+    session: Session, content_hash: str, fingerprint: str
+) -> RuntimeResult | None:
+    """找一条可以直接复用的运行时结论。和 Tier 1 一样**不看 skill_id 与 source**。
+
+    判据：
+
+    - ``content_hash`` 相同：用例属于内容，改了用例 hash 就变；
+    - 指纹相同：同一套执行配置（见 skillup.RuntimeProfile.fingerprint）；
+    - 每一次运行都被判定了（没有 ERROR / SKIP）：和 Tier 1 "incomplete_scans
+      为空才复用"同一个意思——一次网关抖动造成的 incomplete 不该被固化。
+
+    网关背后的模型版本卡不住（跑之前拿不到），漂移了用 force=true 重跑。
+    """
+    stmt = (
+        select(RuntimeResult)
+        .where(
+            RuntimeResult.content_hash == content_hash,
+            RuntimeResult.runtime_fingerprint == fingerprint,
+            RuntimeResult.errored == 0,
+            RuntimeResult.skipped == 0,
+        )
+        .order_by(RuntimeResult.evaluated_at.desc())
+        .limit(1)
+    )
+    return session.execute(stmt).scalars().first()
+
+
+_RUNTIME_COPIED_COLUMNS = (
+    "content_hash",
+    "runtime_fingerprint",
+    "status",
+    "passed",
+    "failed",
+    "errored",
+    "skipped",
+    "case_count",
+    "iterations",
+    "skillup_version",
+    "engine",
+    "engine_version",
+    "model",
+    "judge_model",
+    "input_tokens",
+    "output_tokens",
+    "judge_tokens",
+    "duration_ms",
+    "report_json_uri",
+    "report_html_uri",
+    "events_uri",
+    "error",
+    "evaluated_at",
+)
+
+
+def save_runtime_result(session: Session, row: RuntimeResult) -> RuntimeResult:
+    """写入一条运行时结论。同一身份上已有的那条先删掉，理由同 :func:`save_result`。"""
+    existing = find_runtime_result(
+        session,
+        ContentSource(row.source),
+        row.skill_id,
+        row.content_hash,
+        fingerprint=row.runtime_fingerprint,
+    )
+    if existing is not None and existing.id != row.id:
+        session.delete(existing)
+        session.flush()
+    session.add(row)
+    session.flush()
+    return row
+
+
+def clone_runtime_result(
+    session: Session,
+    origin: RuntimeResult,
+    *,
+    source: ContentSource,
+    skill_id: str,
+    skill_version: str | None,
+) -> RuntimeResult:
+    """把一条既有运行时结论挂到本次的身份上，语义同 :func:`clone_result`。
+
+    报告按 (content_hash, 指纹) 寻址，两者相同就是同一份文件，不复制。
+    ``evaluated_at`` 保持原值——评测确实是那时候跑的。
+    """
+    existing = find_runtime_result(
+        session, source, skill_id, origin.content_hash, fingerprint=origin.runtime_fingerprint
+    )
+    if existing is not None and existing.id == origin.id:
+        return origin
+    row = RuntimeResult(
+        id=str(uuid.uuid4()),
+        source=str(source),
+        skill_id=skill_id,
+        skill_version=skill_version,
+        served_models=list(origin.served_models or []),
+        cases=list(origin.cases or []),
+        **{name: getattr(origin, name) for name in _RUNTIME_COPIED_COLUMNS},
+    )
+    return save_runtime_result(session, row)
+
+
+def runtime_result_to_dto(
+    row: RuntimeResult, *, report_url: str | None = None
+) -> RuntimeEvaluationDTO:
+    """``report_url`` 由调用方给，不回落到存储地址，理由同 :func:`result_to_dto`。"""
+    total = row.passed + row.failed + row.errored + row.skipped
+    return RuntimeEvaluationDTO(
+        skill_id=row.skill_id,
+        skill_version=row.skill_version,
+        content_hash=row.content_hash,
+        status=EvaluationStatus(row.status),
+        evaluated_at=row.evaluated_at,
+        case_count=row.case_count,
+        passed=row.passed,
+        failed=row.failed,
+        errored=row.errored,
+        skipped=row.skipped,
+        pass_rate=row.passed / total if total else 0.0,
+        runtime=RuntimeInfo(
+            skillup_version=row.skillup_version,
+            engine=row.engine,
+            engine_version=row.engine_version,
+            model=row.model,
+            judge_model=row.judge_model,
+            served_models=list(row.served_models or []),
+            iterations=row.iterations,
+            fingerprint=row.runtime_fingerprint,
+        ),
+        input_tokens=row.input_tokens,
+        output_tokens=row.output_tokens,
+        judge_tokens=row.judge_tokens,
+        duration_ms=row.duration_ms,
+        cases=[RuntimeCaseResult.model_validate(c) for c in (row.cases or [])],
+        report_url=report_url,
+        error=row.error,
+    )
+
+
+def runtime_tier_summary(row: RuntimeResult) -> TierResult:
+    """运行时结论在 ``EvaluationDTO.tiers.tier3`` 里的摘要。
+
+    这个分区从第一天就预留好了（TierBundle），填上它详情页不用改接口就能
+    展示。每个用例映射成一个 ValidatorOutcome：用例 ID 当 validator 名，
+    失败原因进 ``errors``——它们和 Tier 1 的 legacy errors 一样只有一句话、
+    没有 severity，不编一个。明细与成本只在 ``/runtime-evaluation`` 里给。
+    """
+    validators = []
+    for raw in row.cases or []:
+        case = RuntimeCaseResult.model_validate(raw)
+        validators.append(
+            ValidatorOutcome(
+                validator=case.case_id,
+                description=case.title,
+                passed=case.status is EvaluationStatus.PASSED,
+                status=str(case.status),
+                errors=[r.reason for r in case.runs if r.reason],
+            )
+        )
+    return TierResult(status=EvaluationStatus(row.status), validators=validators)

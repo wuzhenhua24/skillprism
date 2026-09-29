@@ -10,9 +10,11 @@
 
 from __future__ import annotations
 
+import argparse
 import logging
 import sys
 import time
+from collections.abc import Callable
 
 from skillprism import queue as task_queue
 from skillprism.adapter import to_dto
@@ -63,27 +65,10 @@ def process_task(
     内容来源按 ``task.source`` 取，不看当前配置：任务属于它入队时声明的那个
     接入，而两种接入对 ``skill_id`` 的解释不同。
     """
-    try:
-        source = ContentSource(task.source)
-    except ValueError:
-        task_queue.finish(session, task, error=f"任务的来源取值无法识别：{task.source!r}")
+    resolved = resolve_task_source(session, task, content_sources)
+    if resolved is None:
         return EvaluationStatus.ERROR
-
-    content_source = content_sources.get(source)
-    if content_source is None:
-        # 这条任务声明的接入在本 worker 上没启用。拿另一个客户端去跑就是去
-        # 错的地方按错的解释取内容——而两边的 skill_id 都可能"取得到"，
-        # 于是评出一份看起来正常的错结论。宁可让它带着原因失败。
-        task_queue.finish(
-            session,
-            task,
-            error=(
-                f"任务来源是 {source}，本 worker 只启用了 "
-                f"{'、'.join(str(k) for k in content_sources) or '（无）'}："
-                "配置在排队之后被改过，这条任务作废，请按原来源重新触发"
-            ),
-        )
-        return EvaluationStatus.ERROR
+    source, content_source = resolved
 
     work_dir = settings.work_root / task.id
     skill_dir = work_dir / "skill"
@@ -104,27 +89,12 @@ def process_task(
         finally:
             cleanup(work_dir)
 
-    try:
-        files = content_source.fetch(task.skill_id, task.skill_version)
-    except SkillNotFoundError as exc:
-        # 内容不存在或归档解不出，再试多少次都一样。
-        task_queue.finish(session, task, error=f"取不到内容：{exc}")
-        return EvaluationStatus.ERROR
-    except ContentFetchError as exc:
-        # 网络抖动或管理系统暂时不可用，值得重试——但必须走 requeue。
-        # 让它抛出去的话 session_scope 会回滚掉 claim_next 写的
-        # running/attempts，任务原样退回 queued：既不计次也不留错误信息，
-        # worker 于是每个轮询间隔重领一次，外部看到的只是"一直排队中"。
-        _requeue(session, task, settings, f"取不到内容：{exc}")
+    files = fetch_task_files(session, task, settings, content_source)
+    if files is None:
         return EvaluationStatus.ERROR
 
-    # 目录名用管理系统里登记的 skill 名：SkillEvaluator 的
-    # SCHEMA.name_consistency 会拿它和 frontmatter 的 name 比对。用固定名或
-    # skill_id（可能是纯数字的资源 ID）都会让每个 skill 都平白多一条 HIGH。
-    # 回落到 skill_id 末段只为兼容 skill_name 落库之前排下的存量任务。
-    #
     # 必须在算 hash 之前定下来：它是寻址键的一部分（见 compute_content_hash）。
-    skill_name = task.skill_name or task.skill_id.rstrip("/").split("/")[-1]
+    skill_name = task_skill_name(task)
 
     # 内容可能在入队之后发生变化，以实际取到的内容为准。
     content_hash = compute_content_hash(files, name=skill_name)
@@ -210,6 +180,73 @@ def process_task(
         return dto.status
     finally:
         cleanup(work_dir)
+
+
+def resolve_task_source(
+    session,
+    task: EvaluationTask,
+    content_sources: dict[ContentSource, SkillContentSource],
+) -> tuple[ContentSource, SkillContentSource] | None:
+    """这条任务该用哪个内容来源。取不到时任务已被结束，返回 None。
+
+    按 ``task.source`` 取，不看当前配置：任务属于它入队时声明的那个接入，
+    而两种接入对 ``skill_id`` 的解释不同。
+    """
+    try:
+        source = ContentSource(task.source)
+    except ValueError:
+        task_queue.finish(session, task, error=f"任务的来源取值无法识别：{task.source!r}")
+        return None
+
+    content_source = content_sources.get(source)
+    if content_source is None:
+        # 这条任务声明的接入在本 worker 上没启用。拿另一个客户端去跑就是去
+        # 错的地方按错的解释取内容——而两边的 skill_id 都可能"取得到"，
+        # 于是评出一份看起来正常的错结论。宁可让它带着原因失败。
+        task_queue.finish(
+            session,
+            task,
+            error=(
+                f"任务来源是 {source}，本 worker 只启用了 "
+                f"{'、'.join(str(k) for k in content_sources) or '（无）'}："
+                "配置在排队之后被改过，这条任务作废，请按原来源重新触发"
+            ),
+        )
+        return None
+    return source, content_source
+
+
+def fetch_task_files(
+    session,
+    task: EvaluationTask,
+    settings: Settings,
+    content_source: SkillContentSource,
+) -> list[SkillFile] | None:
+    """取单个 skill 的内容。取不到时任务已被结束或放回队列，返回 None。"""
+    try:
+        return content_source.fetch(task.skill_id, task.skill_version)
+    except SkillNotFoundError as exc:
+        # 内容不存在或归档解不出，再试多少次都一样。
+        task_queue.finish(session, task, error=f"取不到内容：{exc}")
+        return None
+    except ContentFetchError as exc:
+        # 网络抖动或管理系统暂时不可用，值得重试——但必须走 requeue。
+        # 让它抛出去的话 session_scope 会回滚掉 claim_next 写的
+        # running/attempts，任务原样退回 queued：既不计次也不留错误信息，
+        # worker 于是每个轮询间隔重领一次，外部看到的只是"一直排队中"。
+        _requeue(session, task, settings, f"取不到内容：{exc}")
+        return None
+
+
+def task_skill_name(task: EvaluationTask) -> str:
+    """单个 skill 物化时的目录名。
+
+    用管理系统里登记的 skill 名：SkillEvaluator 的 SCHEMA.name_consistency
+    会拿它和 frontmatter 的 name 比对。用固定名或 skill_id（可能是纯数字的
+    资源 ID）都会让每个 skill 都平白多一条 HIGH。回落到 skill_id 末段只为
+    兼容 skill_name 落库之前排下的存量任务。
+    """
+    return task.skill_name or task.skill_id.rstrip("/").split("/")[-1]
 
 
 def _process_bundle(
@@ -423,8 +460,15 @@ def run_once(
     storage: ReportStorage,
     evaluator_version: str | None = None,
     queue: str = "fast",
+    process: Callable[..., EvaluationStatus] | None = None,
 ) -> bool:
-    """处理至多一个任务。返回是否真的处理了任务。"""
+    """处理至多一个任务。返回是否真的处理了任务。
+
+    ``process`` 是处理一条任务的函数，默认是 Tier 1 的 :func:`process_task`。
+    sandbox worker 传运行时评测的那个（见 runtime_worker），其余的领取、
+    异常兜底、重试记账两边共用。
+    """
+    process = process or process_task
     task_id: str | None = None
     try:
         with session_scope() as session:
@@ -432,7 +476,7 @@ def run_once(
             if task is None:
                 return False
             task_id = task.id
-            process_task(
+            process(
                 session,
                 task,
                 settings=settings,
@@ -467,20 +511,57 @@ def _record_crash(task_id: str, settings: Settings, exc: BaseException) -> None:
         logger.exception("任务 %s 的失败状态没能写进去", task_id)
 
 
-def main() -> int:
+def _parse_args(argv: list[str] | None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(prog="skillprism-worker")
+    parser.add_argument(
+        "--queue",
+        choices=("fast", "sandbox"),
+        default="fast",
+        help="fast：Tier 1 静态检查；sandbox：Tier 3 运行时评测（见 docs/runtime-evaluation.md）",
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+    args = _parse_args(argv)
     settings = get_settings()
     settings.ensure_dirs()
 
-    # 启动自检：扫描器缺失会让 Tier 1 产出 incomplete 结论。
-    # 与其带病运行、让界面显示一个没扫全的“合格”，不如直接拒绝启动。
-    try:
-        report = require_ready(settings)
-    except PreflightError as exc:
-        logger.error("启动自检未通过：%s", exc)
-        return 1
+    # 两种队列的前提不同，各自自检，不通过就拒绝启动：
+    # - fast：扫描器缺失会让 Tier 1 产出 incomplete 结论。与其带病运行、
+    #   让界面显示一个没扫全的“合格”，不如直接拒绝启动。
+    # - sandbox：skill-up 与 claude 的版本进结论的运行时指纹，对不上就拒绝，
+    #   否则复用会把新版本评出来的东西当成旧版本的结论。
+    evaluator_version: str | None = None
+    process = None
+    if args.queue == "sandbox":
+        # 延迟导入：runtime_worker 反过来要从本模块取共用的取内容逻辑。
+        from skillprism.runtime_worker import make_process_runtime_task
+        from skillprism.skillup import RuntimePreflightError, preflight_runtime
 
-    logger.info("skillevaluator: %s (%s)", report.binary, report.version or "版本未知")
+        try:
+            ready = preflight_runtime(settings)
+        except RuntimePreflightError as exc:
+            logger.error("启动自检未通过：%s", exc)
+            return 1
+        logger.info(
+            "skill-up: %s (%s)，claude: %s (%s)，模型 %s",
+            ready.skillup_bin,
+            settings.skillup_version,
+            ready.claude_bin,
+            settings.runtime_engine_version,
+            settings.runtime_model,
+        )
+        process = make_process_runtime_task(ready)
+    else:
+        try:
+            report = require_ready(settings)
+        except PreflightError as exc:
+            logger.error("启动自检未通过：%s", exc)
+            return 1
+        logger.info("skillevaluator: %s (%s)", report.binary, report.version or "版本未知")
+        evaluator_version = report.version
 
     if not schema_is_ready():
         logger.error(SCHEMA_NOT_READY_HINT)
@@ -490,7 +571,8 @@ def main() -> int:
     storage = LocalReportStorage(settings.report_root)
 
     logger.info(
-        "worker 已启动，轮询队列 fast，启用的内容来源：%s",
+        "worker 已启动，轮询队列 %s，启用的内容来源：%s",
+        args.queue,
         "、".join(str(kind) for kind in content_sources),
     )
     while True:
@@ -499,7 +581,9 @@ def main() -> int:
                 settings=settings,
                 content_sources=content_sources,
                 storage=storage,
-                evaluator_version=report.version,
+                evaluator_version=evaluator_version,
+                queue=args.queue,
+                process=process,
             )
         except Exception:
             logger.exception("任务处理异常")
