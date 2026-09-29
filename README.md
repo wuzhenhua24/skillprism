@@ -3,8 +3,11 @@
 基于 [SkillEvaluator](https://github.com/NVIDIA/SkillEvaluator) 的评测编排与结果服务，
 把 skill 质量结果回写到公司 skill 管理系统。
 
-**当前范围：M1 / Tier 1。** 定位是参考信息，不拦截发布。
-Tier 2（跨 skill 相似度）与 Tier 3（沙箱实跑）在数据模型上预留了位置，尚未实现。
+**当前范围：Tier 1 静态检查 + Tier 3 运行时评测。** 定位是参考信息，不拦截发布。
+Tier 3 用 [skill-up](https://github.com/alibaba/skill-up) 把 skill 装进 Claude Code
+实跑作者写的用例，**本期不隔离**，设计与取舍见
+[docs/runtime-evaluation.md](docs/runtime-evaluation.md)。
+Tier 2（跨 skill 相似度）在数据模型上预留了位置，尚未实现。
 
 ## 快速开始
 
@@ -120,6 +123,14 @@ worker 另起一个进程：
 .venv/bin/skillprism-worker
 ```
 
+运行时评测（Tier 3）是另一个 worker，领 sandbox 队列。需要 skill-up、Claude Code
+和模型网关的配置，缺一项就拒绝启动（配置项见
+[docs/runtime-evaluation.md §9](docs/runtime-evaluation.md#9-部署与配置)）：
+
+```bash
+.venv/bin/skillprism-worker --queue sandbox
+```
+
 部署到服务器见 [docs/deployment.md](docs/deployment.md)（Ubuntu，非容器）。
 
 ## 模块
@@ -133,6 +144,9 @@ worker 另起一个进程：
 | `content.py` | 内容来源协议。已有三种实现：本地目录 / 管理系统 zip / GitLab 归档 |
 | `storage.py` | 报告存储协议。生产替换为对象存储 |
 | `queue.py` / `worker.py` | 任务队列与处理循环 |
+| `skillup.py` | Tier 3 执行层：收集并改写作者的用例、生成 eval.yaml、子进程调 skill-up、启动自检 |
+| `runtime_adapter.py` | skill-up 产物 → 运行时结论。**唯一了解 skill-up 输出格式的模块** |
+| `runtime_worker.py` | sandbox 队列的任务处理 |
 | `repository.py` / `models.py` | 持久化 |
 
 ## 关键设计

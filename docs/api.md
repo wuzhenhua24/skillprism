@@ -53,6 +53,8 @@
 | GET | `/api/tasks/{task_id}` | 轮询任务状态、取结论寻址键 | `200` |
 | GET | `/api/skills/{skill_id}/evaluation` | 取一条结论 | `200` |
 | GET | `/api/skills/{skill_id}/report` | 取 HTML 报告 | `200` |
+| GET | `/api/skills/{skill_id}/runtime-evaluation` | 取一条运行时评测（Tier 3）结论，见 §13 | `200` |
+| GET | `/api/skills/{skill_id}/runtime-report` | 取运行时评测的 HTML 报告，见 §13 | `200` |
 | GET | `/healthz` | 健康检查 + 扫描器齐备情况 | `200` |
 
 `POST /embed/v1/embeddings` 也在同一个进程里，但它是给评测子进程用的内部 shim，
@@ -73,7 +75,7 @@
 | `skill_id` | string | 是 | 管理系统里的资源 ID，也是拼下载地址用的那个 ID |
 | `skill_name` | string ≤255 | **单 skill 必填** | 管理系统里**登记的**技能名。物化目录用它命名，会和包内 frontmatter 的 `name` 比对。必须是单段名字，不能含 `/`、`..` |
 | `skill_version` | string ≤128 | 否 | 用户上传时手填的自由文本标签，与包内版本无关。**不决定取到哪份内容** |
-| `tier` | string | 否 | `tier1`（默认）。`tier2` / `tier3` 返回 `501` |
+| `tier` | string | 否 | `tier1`（默认，静态检查）或 `tier3`（运行时评测，见 §13）。`tier2` 返回 `501` |
 | `force` | bool | 否 | 默认 `false`（内容未变时复用已有结论）。`true` 强制重跑 |
 | `bundle` | bool | 否 | 默认 `false`。`true` 表示 `skill_id` 指向装着多个 skill 的父目录，见 §4.4 |
 
@@ -176,8 +178,8 @@ zip 接入下换个 `skill_version` 仍会折叠（版本只是标签）；GitLa
 | `202` | 已受理 |
 | `400` | 保留通道 + 两种接入都启用，说不清是哪一种 |
 | `409` | 这个入口对应的接入在本部署没启用（收了也没人跑） |
-| `422` | 请求体不合法：缺 `skill_name`、名字含路径分隔符、GitLab 三字段写错 |
-| `501` | `tier2` / `tier3` 尚未实现 |
+| `422` | 请求体不合法：缺 `skill_name`、名字含路径分隔符、GitLab 三字段写错、`tier3` 与 `bundle: true` 同时出现 |
+| `501` | `tier2` 尚未实现 |
 
 ---
 
@@ -197,7 +199,7 @@ zip 接入下换个 `skill_version` 仍会折叠（版本只是标签）；GitLa
 | `bundle` | bool | 这次评的是不是一组耦合 skill。**下面两个 hash 字段的含义由它决定** |
 | `content_hash` | string \| null | 单任务：这份内容的指纹，也是结论的寻址键。**bundle 任务恒为 `null`** |
 | `context_hash` | string \| null | bundle：整组内容的指纹（= 每条成员结论的 `context_hash`）。**单任务恒为 `null`** |
-| `tier` | string | `tier1` |
+| `tier` | string | `tier1` / `tier3` |
 | `queue` | string | `fast` / `index` / `sandbox`（按 tier 路由） |
 | `state` | string | `queued` / `running` / `done` / `failed` |
 | `attempts` | int | 已尝试次数（默认上限 3） |
@@ -212,6 +214,7 @@ zip 接入下换个 `skill_version` 仍会折叠（版本只是标签）；GitLa
 | `skill_id` | string | 这条结论的 ID（bundle 成员是 `<bundle_id>/<成员目录名>`） |
 | `content_hash` | string | 查结论用的钥匙 |
 | `context_hash` | string \| null | 上下文，单独评的为 `null`。**也是钥匙的一部分** |
+| `runtime_fingerprint` | string \| null | 只有 `tier3` 任务有：运行时结论的执行配置指纹，也是钥匙的一部分，见 §13 |
 | `status` | string | 见 §9 |
 | `report_url` | string \| null | 报告直链，见 §7 |
 
@@ -408,7 +411,8 @@ curl -G http://127.0.0.1:8000/api/skills/2000705/evaluation \
 | `tiers.tier1.validators[]` | 按 validator 名分组，不拍平成固定列；上游新增 validator 不需要改契约 |
 | `validators[].errors[]` | 上游只有一句话、没有 severity 的 legacy 问题（**死链走这个通道**）。`passed=false` 而 `findings` 为空时，原因在这里 |
 | `findings[].file_path` | 已归一化成 skill 内部的相对路径，不会暴露我们的临时目录 |
-| `tiers.tier2` / `tier3` | 当前恒为 `null`，字段先占位，将来补齐时契约不变 |
+| `tiers.tier2` | 当前恒为 `null`，字段先占位，将来补齐时契约不变 |
+| `tiers.tier3` | 同一份内容（同 `content_hash`）最近一条运行时评测的**摘要**，没跑过为 `null`。每个用例一项 `validators[]`（`validator` 是用例 ID，失败原因在 `errors[]`）。明细、模型与成本在 §13 的端点里 |
 | `report_url` | 见 §7。没配公开域名或这条结论没有报告时为 `null` |
 | `error` | `status=error` 时说明原因 |
 
@@ -496,7 +500,7 @@ curl -G http://127.0.0.1:8000/api/skills/2000705/evaluation \
 
 **内容来源 `source`**：`zip`（管理系统下载接口）/ `gitlab` / `local`（仅开发调试）。
 
-**层级 `tier`**：`tier1`（唯一已实现）/ `tier2` / `tier3`。
+**层级 `tier`**：`tier1`（静态检查）/ `tier2`（未实现）/ `tier3`（运行时评测，见 §13）。
 
 ---
 
@@ -526,7 +530,9 @@ curl -G http://127.0.0.1:8000/api/skills/2000705/evaluation \
 | `422` | 查询 | `source 只能是 local、zip、gitlab，收到 'x'` | 改参数 |
 | `404` | 任务 | `任务不存在` | 确认 `task_id` |
 | `404` | 结论 / 报告 | 见 §6 的三种 | 按文案区分 |
-| `501` | 触发 | `tier2 尚未实现，当前仅支持 tier1` | 只传 `tier1` |
+| `422` | 触发 | `运行时评测（tier3）暂不支持 bundle` | 逐个 skill 触发 |
+| `404` | 运行时结论 / 报告 | `该 skill 没有对应的运行时评测结果` | 确认触发过 `tier3`、任务已 `done` |
+| `501` | 触发 | `tier2 尚未实现，当前支持 tier1、tier3` | 不传 `tier2` |
 | `5xx` | 任意 | | **不应影响用户的上传流程**，重试几次后放弃并记账 |
 
 注意「skill 不存在」**不会**是一个同步 4xx——那要等 worker 真去取才知道，届时体现为任务的
@@ -561,7 +567,8 @@ OpenAI 兼容的 embeddings 批量拆分 shim，是给 Tier 2 的评测子进程
 
 ### 11.5 其它
 
-- **Tier 2 / Tier 3 未实现**：`tiers.tier2` / `tier3` 恒为 `null`，`tier=tier2` 触发返回 `501`。
+- **Tier 2 未实现**：`tiers.tier2` 恒为 `null`，`tier=tier2` 触发返回 `501`。
+- **一组 skill 的运行时评测**：没有，`tier3` + `bundle` 返回 `422`。
 - **按 ref / 按版本号查结论**：没有，见 §6 最后一段。
 - **不要把 bundle 的结论说成「这个 plugin 安全」**：我们只取 `skills` 子树，`hooks/`、
   `commands/`、`agents/` 一个字节都没下载，而 `hooks.json` 恰恰能在工具调用前后跑任意命令。
@@ -606,3 +613,106 @@ curl -s -G $BASE/api/skills/2000705/evaluation \
 - [ ] 我们返回 5xx 时，对方的上传流程不受影响
 - [ ] bundle 场景单独走一遍（`bundle: true`，确认任务 `content_hash` 为 `null`、
       成员从 `results[]` 取）
+
+---
+
+## 13. 运行时评测（Tier 3）
+
+把 skill 装进一个真实的 agent（Claude Code），喂作者写在 skill 里的用例
+（`evals/cases/*.yaml`），看它做得对不对。设计与取舍见
+[runtime-evaluation.md](runtime-evaluation.md)，给作者的用例约定见
+[runtime-cases.md](runtime-cases.md)。
+
+### 13.1 触发
+
+和 Tier 1 同一组入口，`tier` 传 `tier3`：
+
+```json
+POST /api/evaluations/gitlab
+{"project": "group/repo", "subdir": "skills/log-triage", "ref": "v1.2.0",
+ "skill_name": "log-triage", "tier": "tier3"}
+```
+
+- **Tier 1 和 Tier 3 是两个任务**，各自排队、各自出结论，互不折叠。要两个都评就触发两次。
+- 不支持 `bundle: true`（`422`）。
+- **由管理系统显式触发**，建议不要挂在每次上传上：一个用例约 16～19 秒、1.6 万 token 起，
+  10 个用例的 skill 一次要两三分钟。
+- 其余语义（`202` 是受理、排队中重复触发会折叠、`force`）同 §4.4。
+
+### 13.2 任务怎么结束
+
+轮询同 §5。`tier3` 任务特有的几种 `error`：
+
+| `error` 前缀 | 含义 | 怎么办 |
+| --- | --- | --- |
+| `无运行时用例：…` | skill 里没有 `evals/cases/*.yaml` | **提示作者补用例**，不是评测失败。不重试 |
+| `用例无效：…` / `用例文件扩展名必须是 .yaml…` / `用例数 … 超过上限…` / `….yaml：用例级 MCP 只能用 mode: mocked` | 作者的用例写错了，原文给出 | 转给作者。不重试 |
+| `模型网关不可达：…` / `模型网关返回 …` | 我们这边的网关问题 | 自动退避重试，找运维 |
+| `全部用例都没被判定：…` | 每个用例都出错（超时、网关抖动） | 自动退避重试 |
+
+「无运行时用例」要和其他失败分开展示：它的意思是「这个 skill 还没写用例」。
+
+`results[]` 里是一条，多了 `runtime_fingerprint`；`context_hash` 恒为 `null`。
+
+### 13.3 `GET /api/skills/{skill_id}/runtime-evaluation`
+
+| 参数 | 说明 |
+| --- | --- |
+| `source` | 同 §6 |
+| `content_hash` | 从 `results[]` 抄。不带则取这个 skill 最近的一条（GitLab 接入下多半不是你要的，理由同 §6） |
+| `fingerprint` | 从 `results[].runtime_fingerprint` 抄。**同一份内容换个模型评过就有两条结论**，不带取最近的那条 |
+
+```json
+{
+  "skill_id": "group/repo:skills/log-triage",
+  "skill_version": "v1.2.0",
+  "content_hash": "sha256:9f2c…",
+  "status": "failed",
+  "evaluated_at": "2026-09-29T03:12:40Z",
+  "case_count": 4,
+  "passed": 3, "failed": 1, "errored": 0, "skipped": 0,
+  "pass_rate": 0.75,
+  "runtime": {
+    "skillup_version": "0.12.0",
+    "engine": "claude_code", "engine_version": "2.1.284",
+    "model": "deepseek-v4-flash", "judge_model": "deepseek-v4-flash",
+    "served_models": ["deepseek-v4-flash-ga-260731"],
+    "iterations": 1,
+    "fingerprint": "sha256:5b1e…"
+  },
+  "input_tokens": 64112, "output_tokens": 1843, "judge_tokens": 16276,
+  "duration_ms": 71250,
+  "cases": [
+    {"case_id": "basic-format", "title": "Produces the fixed ticket layout",
+     "status": "passed", "pass_rate": 1.0,
+     "runs": [{"iteration": 1, "status": "PASS", "reason": null}]},
+    {"case_id": "severity-p0", "title": "Data loss is P0",
+     "status": "failed", "pass_rate": 0.0,
+     "runs": [{"iteration": 1, "status": "FAIL",
+               "reason": "output_matches.all: missing [(?m)^P0\\s*$]：output does not match required regex patterns"}]}
+  ],
+  "report_url": "https://skillprism.internal/api/skills/group/repo:skills/log-triage/runtime-report?source=gitlab&content_hash=sha256%3A9f2c…&fingerprint=sha256%3A5b1e…",
+  "error": null
+}
+```
+
+| 字段 | 说明 |
+| --- | --- |
+| `status` | 按全部运行判：有 FAIL 即 `failed`；没有 FAIL 但有运行没被判定（ERROR / SKIP）是 `incomplete`，**不是通过**；全部 PASS 才是 `passed` |
+| `passed` / `failed` / `errored` / `skipped` | 全部用例、全部迭代的**运行次数**，不是用例数 |
+| `pass_rate` | 通过的运行数 / 总运行数 |
+| `runtime` | 这条结论是在什么配置下跑出来的。**必须随结果展示**，理由同 Tier 1 的 `evaluator.version` |
+| `runtime.served_models` | 网关实际应答的模型。请求的是别名，应答的是具体版本；取不到为空列表 |
+| `cases[].runs[].status` | skill-up 的原始判定：`PASS` / `FAIL` / `ERROR` / `SKIP` |
+| `cases[].runs[].reason` | 没通过的原因：FAIL 是没满足的断言，ERROR / SKIP 是出错原因 |
+| `report_url` | 钉住 `content_hash` 与 `fingerprint`，理由同 §7 |
+
+**同样的内容、同样的执行配置不会重跑**：结论按内容复用，和 Tier 1 一样不看 `skill_id`。
+模型、engine 版本、迭代次数等任何一项变了都会重跑。网关在同一个模型名背后换了版本时
+我们察觉不到，要重评用 `force: true`。
+
+### 13.4 `GET /api/skills/{skill_id}/runtime-report`
+
+参数同 §13.3，回 skill-up 生成的 HTML 报告，响应头同 §7。**报告里有用例的 prompt 和
+agent 的完整回复**，承载要求同 §7：独立域名、不要内联进管理系统的 DOM。
+

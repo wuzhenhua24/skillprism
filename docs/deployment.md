@@ -8,8 +8,9 @@
 ## 部署形态
 
 ```
-skillprism-api      uvicorn，对管理系统提供 HTTP 接口
-skillprism-worker   轮询任务表，调用 skillevaluator CLI 跑评测
+skillprism-api              uvicorn，对管理系统提供 HTTP 接口
+skillprism-worker           轮询 fast 队列，调用 skillevaluator CLI 跑 Tier 1 静态检查
+skillprism-worker-sandbox   （可选）轮询 sandbox 队列，调用 skill-up 跑 Tier 3 运行时评测，见第十二节
         ↓ 共用
 /var/lib/skillprism/   SQLite 库、报告、物化临时目录
 ```
@@ -630,3 +631,172 @@ worker 写的报告，所以两者必须同机。要真正横向扩展需要先�
 2. ~~数据库迁移~~——已引入 Alembic。
 3. ~~报告保留策略~~——当前有意不做，见第八节的说明与三个坑。
 4. **监控**——目前只有 journald 日志，没有指标。至少要能看到任务失败率和积压量。
+5. **运行时评测的隔离**——开了第十二节的 sandbox worker 就要算这一笔：agent 以
+   服务账号身份在本机执行 skill 作者写的指令，读得到本机的全部凭据。前提是
+   skill 都是内部的；这个前提一变（外部上传、导入第三方 skill），必须先做隔离。
+
+## 十二、运行时评测（Tier 3，可选）
+
+把 skill 装进 Claude Code 实跑作者写的用例。设计与取舍见
+[runtime-evaluation.md](runtime-evaluation.md)，对接见 [api.md §13](api.md#13-运行时评测tier-3)。
+它是**另一个 worker 进程**（`--queue sandbox`），不开就不影响 Tier 1。
+
+### 先想清楚：它不隔离
+
+agent 以 `skillprism` 身份在本机跑，Claude Code 带着 `bypassPermissions`，执行任何
+命令都不需要确认；驱动它的是 skill 作者写的 SKILL.md 和用例。它读得到：
+
+- `/etc/skillprism/service.env`——这个文件是 `640 root:skillprism`，数据库密码、
+  GitLab 令牌、模型 key 都在里面；
+- `/var/lib/skillprism` 下其他 skill 的内容、报告，以及别的任务的工作目录。
+
+子进程环境我们只给白名单，但这挡不住它直接读文件。接受它的前提是**所有 skill 都是
+公司内部的**。
+
+**也还不能放到另一台机器上。** 报告存本地文件系统，API 要读 worker 写的报告，
+所以 sandbox worker 只能和 API 同机（见开头的约束表）。要分机先换对象存储
+（`storage.py`），这是做隔离之前的第一步。
+
+本期能做的：模型 key 用专门的一个并设额度上限，泄漏了损失有上限、能单独吊销。
+
+### 安装
+
+两样东西都要在能联网的机器上准备好再拷过来（本机出网受限）。
+
+**skill-up：从 tag 编译，不要用 `install.sh`**（它从 GitHub 下载）。版本要和
+`SKILLPRISM_SKILLUP_VERSION` 一致，默认 `0.12.0`：
+
+```bash
+# 在能联网、装了 Go 1.25+ 的机器上
+git clone --branch v0.12.0 --depth 1 https://github.com/alibaba/skill-up.git
+cd skill-up
+GOOS=linux GOARCH=amd64 go build -ldflags "-X main.version=0.12.0" -o skill-up ./cmd/skill-up
+```
+
+```bash
+# 拷到服务器后
+sudo install -o skillprism -g skillprism -m 755 skill-up /var/lib/skillprism/.local/bin/skill-up
+sudo -u skillprism /var/lib/skillprism/.local/bin/skill-up --version   # skill-up version 0.12.0
+```
+
+**Claude Code：装一个确定的版本到服务账号下**，版本写进
+`SKILLPRISM_RUNTIME_ENGINE_VERSION`。装好后确认：
+
+```bash
+sudo -u skillprism env HOME=/tmp/cc-check PATH=/var/lib/skillprism/.local/bin:/usr/bin:/bin claude --version
+```
+
+Claude Code 开跑时会尝试访问 Anthropic 的非必要服务，skill-up 已经设了
+`CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`。**上线前在这台机器上实跑一次**
+（见下面的验证），确认它不会卡在某个联网调用上——和当初 semgrep 版本检查挂
+30 秒是同一类坑。
+
+### 配置
+
+追加到 `/etc/skillprism/service.env`：
+
+```bash
+SKILLPRISM_SKILLUP_BIN=/var/lib/skillprism/.local/bin/skill-up
+SKILLPRISM_SKILLUP_VERSION=0.12.0
+# 子进程只拿到这个 PATH，必须能找到 claude、bash、git
+SKILLPRISM_RUNTIME_PATH=/var/lib/skillprism/.local/bin:/usr/local/bin:/usr/bin:/bin
+SKILLPRISM_RUNTIME_ENGINE_VERSION=2.1.284
+# 内部模型网关的 Anthropic 兼容地址，不含 /v1/messages
+SKILLPRISM_RUNTIME_BASE_URL=https://<网关>/<anthropic 兼容路径>
+# 专门给运行时评测的 key，设额度
+SKILLPRISM_RUNTIME_API_KEY=
+SKILLPRISM_RUNTIME_MODEL=
+# 留空同上
+SKILLPRISM_RUNTIME_JUDGE_MODEL=
+# 模型的真实上下文窗口。Claude Code 不认识非 Claude 的模型名，默认按 200k 压缩
+SKILLPRISM_RUNTIME_CONTEXT_TOKENS=
+SKILLPRISM_RUNTIME_ITERATIONS=1
+SKILLPRISM_RUNTIME_PARALLELISM=2
+SKILLPRISM_RUNTIME_CASE_TIMEOUT_SECONDS=300
+SKILLPRISM_RUNTIME_MAX_TURNS=12
+SKILLPRISM_RUNTIME_MAX_CASES=20
+# 额外给评测子进程的环境变量，K=V 逗号分隔。不能设 PATH、HOME、GATEWAY_*
+SKILLPRISM_RUNTIME_ENV=
+```
+
+**换模型、换迭代次数、换 skill-up 或 Claude Code 版本，已有结论都会被视为另一种结论**
+（进运行时指纹），下次触发时重跑。并发与网关地址不在其中。
+
+### systemd
+
+```bash
+sudo tee /etc/systemd/system/skillprism-worker-sandbox.service > /dev/null <<'EOF'
+[Unit]
+Description=SkillPrism Worker (runtime evaluation)
+After=network-online.target skillprism-api.service
+Wants=network-online.target
+
+[Service]
+Type=exec
+User=skillprism
+Group=skillprism
+WorkingDirectory=/opt/skillprism
+EnvironmentFile=/etc/skillprism/service.env
+Environment=PATH=/var/lib/skillprism/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/opt/skillprism/.venv/bin/skillprism-worker --queue sandbox
+Restart=on-failure
+RestartSec=10
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/skillprism
+PrivateDevices=true
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+sudo systemctl daemon-reload
+sudo systemctl enable --now skillprism-worker-sandbox
+```
+
+启动时自检：配置缺项、`skill-up --version` 或 `claude --version` 和配置钉的版本对不上，
+都会**拒绝启动**，日志里写明是哪一项。两个 worker 领的是不同队列，互不干扰。
+
+### 验证
+
+用仓库里的模拟 skill 跑一次（三个用例，约 1 分钟、5 万 token）：
+
+```bash
+sudo -u skillprism cp -r /opt/skillprism/tests/fixtures/runtime_skill/ticket-formatter \
+  /var/lib/skillprism/skills/
+curl -s -X POST http://127.0.0.1:8000/api/evaluations \
+  -H 'Content-Type: application/json' \
+  -d '{"skill_id":"ticket-formatter","skill_name":"ticket-formatter","tier":"tier3"}'
+
+sleep 90
+curl -s http://127.0.0.1:8000/api/skills/ticket-formatter/runtime-evaluation | python3 -m json.tool
+```
+
+期望 `status` 是 `passed`、`runtime.served_models` 非空。
+
+### 故障排查
+
+| 现象 | 原因 | 处理 |
+| --- | --- | --- |
+| sandbox worker 启动即退出，"skill-up 版本是 … 配置钉的是 …" | 二进制换了而配置没跟着改（或反过来） | 两边对齐。版本进结论指纹，不对齐会让复用把新版本的结果当成旧版本的 |
+| 任务 `error` 为「无运行时用例：…」 | skill 里没有 `evals/cases/*.yaml` | 不是故障。提示作者按 [runtime-cases.md](runtime-cases.md) 补用例 |
+| 任务 `error` 为「用例无效：…」 | 作者的用例 skill-up 校验不过，原文附在后面 | 转给作者 |
+| 任务在退避重试，`error` 为「模型网关不可达 / 返回 401」 | 网关地址、key 或网络 | 手工探一次（见下），应当是 200。实测一次要 3～8 秒 |
+| 任务在退避重试，`error` 为「全部用例都没被判定：…context deadline exceeded…」 | 探活通过后网关变慢或限流，每个用例都耗满了超时 | 看网关侧；用例本身很长时调大 `SKILLPRISM_RUNTIME_CASE_TIMEOUT_SECONDS` |
+| `runtime.served_models` 为空 | 从 Claude Code 会话记录里取不到模型名，多半是 Claude Code 换了版本、记录格式变了 | 只影响展示，不影响结论。`tests/test_e2e_runtime.py` 会在这种时候变红 |
+| 同一份 skill 结果时好时坏 | 模型本身的随机性 | 调大 `SKILLPRISM_RUNTIME_ITERATIONS` 看每个用例的通过率；代价是 token 成倍 |
+
+手工探网关：
+
+```bash
+curl -sS -o /dev/null -w '%{http_code}\n' \
+  -H "x-api-key: $SKILLPRISM_RUNTIME_API_KEY" -H 'anthropic-version: 2023-06-01' \
+  -H 'content-type: application/json' \
+  -d "{\"model\":\"$SKILLPRISM_RUNTIME_MODEL\",\"max_tokens\":1,\"messages\":[{\"role\":\"user\",\"content\":\"ping\"}]}" \
+  "$SKILLPRISM_RUNTIME_BASE_URL/v1/messages"
+```
+

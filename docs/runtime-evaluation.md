@@ -1,8 +1,9 @@
 # 运行时评测（Tier 3）设计
 
-> 状态：**设计稿，尚未实现**（2026-09-29）。落地后，其中讲"为什么"的部分并入
-> README，对接方要照着做的部分并入 [api.md](api.md)，部署部分并入
-> [deployment.md](deployment.md)。
+> 状态：**已实现**（2026-09-29）。对接方要照着做的在 [api.md §13](api.md#13-运行时评测tier-3)，
+> 部署在 [deployment.md 第十二节](deployment.md#十二运行时评测tier-3可选)，给作者的用例约定在
+> [runtime-cases.md](runtime-cases.md)。这一篇讲为什么长成这样；实现与设计稿不同的地方
+> 已就地改过，并注明了原因。
 
 Tier 1 是静态检查：看 skill 写得对不对。Tier 3 是实跑：把 skill 装进一个真实
 的 agent，喂作者写好的用例，看它做得对不对。执行器用
@@ -122,6 +123,8 @@ case ID 就是文件名。fixture、判分脚本、mock MCP 的配置都放在 `
 | `constraints.timeout_seconds` | 不超过平台上限 | 一个用例写 3600s 就能拖住整个 worker |
 | `constraints.max_turns` | 不超过平台上限 | 同上，还关系到 token |
 | `mcp.servers`（用例级） | 只允许 `mode: mocked` | skill-up 本身也只允许用例级 mocked；eval 级的 MCP 由平台生成，本期为空 |
+
+`.yml` 扩展名的文件报错而不是忽略：写了用例却没被跑，是作者最难发现的一种错。
 
 用例总数设上限（默认 20），超出时任务报错、**不截断**：只跑前 N 个会给出一个
 覆盖不全、看起来却完整的结论。
@@ -293,7 +296,11 @@ skill-up run      <skill>/evals/.skillprism-eval.yaml \
 白等，之后还要重试 `max_attempts` 轮。
 
 所以每个任务开跑前，先向 `GATEWAY_BASE_URL/v1/messages` 发一个 `max_tokens=1` 的
-请求，10s 超时。失败就直接重新排队，不启动 skill-up。每个任务多花几十个 token。
+请求。失败就直接重新排队，不启动 skill-up。每个任务多花几十个 token。
+
+超时是 30s（`SKILLPRISM_RUNTIME_PROBE_TIMEOUT_SECONDS`），不是设计稿里的 10s：实测
+方舟上这样一个请求要 2.6～7.9s——带 thinking 的模型哪怕只让它出 1 个 token 也要先想
+一下，10s 会误判。
 
 ---
 
@@ -378,7 +385,8 @@ bundle，所以不需要 `context_hash`，也就没有 NULL 的问题，一条�
 
 报告存储路径需要多一层命名空间：`LocalReportStorage.put` 现在按
 `(content_hash, context_hash)` 分目录，Tier 3 的文件会和 Tier 1 的
-`report.html` 重名。加一个 `runtime/<fingerprint 前 16 位>/` 前缀。
+`report.html` 重名。加一层 `runtime-<指纹前 16 位>/` 子目录（`storage.put` 的
+`variant` 参数）。
 
 ### 8.2 对外接口的变化
 
@@ -389,19 +397,21 @@ bundle，所以不需要 `context_hash`，也就没有 NULL 的问题，一条�
 - `tier3` 和 `bundle: true` 同时出现时返回 `422`，写明本期不支持。
 - 其余语义（202 是受理、重复触发会折叠、`force`）不变。
 
-**任务**（`GET /api/tasks/{task_id}`）：结构不变。`tier3` 任务的 `results[]` 从
-`runtime_result` 反查，`report_url` 指向运行时报告。`task_results` 按 `task.tier` 分支。
+**任务**（`GET /api/tasks/{task_id}`）：`tier3` 任务的 `results[]` 从 `runtime_result`
+反查，`report_url` 指向运行时报告。`results[]` 每项多一个 `runtime_fingerprint`
+（Tier 1 任务为 null）：同一份内容换个模型评过就有两条结论，只给 `content_hash`
+钥匙就不够了。
 
 **查询**，新增两个端点：
 
 ```
-GET /api/skills/{skill_id}/runtime-evaluation?source=&content_hash=
-GET /api/skills/{skill_id}/runtime-report?source=&content_hash=
+GET /api/skills/{skill_id}/runtime-evaluation?source=&content_hash=&fingerprint=
+GET /api/skills/{skill_id}/runtime-report?source=&content_hash=&fingerprint=
 ```
 
 规则照搬 `/evaluation`：多来源时必须带 `source`；带 `content_hash` 时精确取，
 不带时退回最近一条（GitLab 接入下同样多半不是你要的）。同一份内容在多个指纹下
-都评过时，取最近一条。返回的 `RuntimeEvaluationDTO` 包含状态、计数、通过率、
+都评过时，不带 `fingerprint` 取最近一条；`report_url` 里三个参数都钉住。返回的 `RuntimeEvaluationDTO` 包含状态、计数、通过率、
 每个用例的明细、执行配置（engine、模型、实际应答的模型）、token、耗时、`report_url`。
 
 **`EvaluationDTO.tiers.tier3`**（已预留）：`/evaluation` 返回 Tier 1 结论时，
@@ -432,6 +442,8 @@ Tier 1 不同，不查扫描器，改为检查：
 | 配置 | 默认 | 说明 |
 | --- | --- | --- |
 | `SKILLPRISM_SKILLUP_BIN` | `skill-up` | |
+| `SKILLPRISM_SKILLUP_VERSION` | `0.12.0` | 钉住的版本，预检核对。进指纹 |
+| `SKILLPRISM_RUNTIME_PROBE_TIMEOUT_SECONDS` | `30` | §6.4 |
 | `SKILLPRISM_RUNTIME_PATH` | — | 子进程的 PATH，必填 |
 | `SKILLPRISM_RUNTIME_ENGINE_VERSION` | — | 必填，例 `2.1.284` |
 | `SKILLPRISM_RUNTIME_BASE_URL` | — | 网关的 Anthropic 兼容地址，必填，启动时校验是否为 http(s) |
@@ -475,12 +487,19 @@ Tier 1 不同，不查扫描器，改为检查：
 接受它的前提是**所有 skill 都是公司内部的，上传者都是内部员工**。这个前提变了，
 比如开放外部上传、或者把第三方 skill 导进来评，就必须先做隔离，再开放 Tier 3。
 
-本期能做、而且成本很低的三件事：
+实现时核实了两处，比设计稿写的更直接：
+
+- 它读得到凭据不需要什么技巧：`/etc/skillprism/service.env` 是
+  `640 root:skillprism`，agent 以 `skillprism` 身份直接 `cat` 就行。子进程环境给
+  白名单挡不住这个。
+- 设计稿建议把 sandbox worker 放到另一台机器上，**现在做不到**：报告存本地文件系统，
+  API 要读 worker 写的报告，两者必须同机（deployment.md 的约束表）。要分机得先换
+  对象存储，这是做隔离之前的第一步。
+
+本期能做、而且成本很低的两件事：
 
 1. 模型 key 用专门的一个，设额度上限。泄漏了损失有上限，也能单独吊销。
-2. sandbox worker 和 API 分开部署。最好放另一台机器，不和 PG 同机，这样上面
-   那几类文件在那台机器上本来就不存在。
-3. 每个任务的 HOME 和工作目录跑完就删（§5.3）。
+2. 每个任务的 HOME 和工作目录跑完就删（§5.3）。
 
 ---
 
@@ -514,11 +533,13 @@ Tier 1 不同，不查扫描器，改为检查：
 
 ---
 
-## 13. 待定项
+## 13. 已定的取舍
 
-| 问题 | 建议 | 备注 |
+2026-09-29 按下表的建议定下并实现。
+
+| 问题 | 决定 | 备注 |
 | --- | --- | --- |
-| 无用例用什么表达 | 本期：任务 `error` + 固定前缀，不写结论 | 另一个方案是新增状态值，但那会改对外契约的枚举 |
+| 无用例用什么表达 | 任务 `error` + 固定前缀（`无运行时用例：`），不写结论 | 另一个方案是新增状态值，但那会改对外契约的枚举 |
 | 默认迭代次数 | 1 | POC 里模拟 skill 三次结果一致，真实 skill 未知。先用 1，攒一批数据看不稳定率再调 |
 | `tiers.tier3` 摘要做不做 | 做 | 这个位置本来就是为此预留的；不做的话，详情页要多调一个端点 |
 | 谁来触发 Tier 3 | 管理系统显式触发 | 不在上传时自动触发，先把成本控制在人手里 |
@@ -527,7 +548,7 @@ Tier 1 不同，不查扫描器，改为检查：
 
 ## 附录 A：给作者的用例约定（草案）
 
-正式模板另出。要点：
+正式版见 [runtime-cases.md](runtime-cases.md)。要点：
 
 1. 用例放在 `evals/cases/<case-id>.yaml`，一个文件一个用例，文件名就是 ID。
 2. **所有测试材料都放在 `evals/` 下**，包括样例仓库、图片、判分脚本、mock 配置。
