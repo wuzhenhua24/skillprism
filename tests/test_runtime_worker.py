@@ -361,6 +361,31 @@ def test_a_run_that_did_not_finish_is_retried(env):
     assert _rows() == []
 
 
+def test_a_killed_attempts_leftovers_do_not_fail_the_retry(env):
+    """2026-09-29 task 3231e099：尝试进行中 worker 被重启，重领后物化失败终态。
+
+    SIGTERM 下 finally 不跑，工作目录（物化的 skill、专用 HOME、skill-up 的
+    输出）留在盘上；事务回滚，任务回到 queued、attempts 归零。这里直接摆出
+    那个现场。
+    """
+    settings, fake, _, _ = env
+    task_id = _enqueue()
+    work_dir = settings.work_root / task_id
+    stale = work_dir / "skill" / "skills" / "ticket-formatter"
+    shutil.copytree(MOCK_SKILL, stale)
+    (stale / "left-by-last-attempt.md").write_text("stale\n", encoding="utf-8")
+    (work_dir / "home" / ".claude").mkdir(parents=True)
+
+    assert _run(env)
+
+    task = _task(task_id)
+    assert task.state == str(TaskState.DONE), task.error
+    assert task.attempts == 1
+    assert [row.status for row in _rows()] == ["passed"]
+    assert fake.commands() == ["validate", "run"]
+    assert not work_dir.exists()
+
+
 def test_the_same_content_is_reused_across_skill_ids(env):
     """同样的字节、同样的执行配置就是同一种结论，重跑只是花 token。"""
     _, fake, _, _ = env

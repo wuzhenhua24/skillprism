@@ -449,6 +449,40 @@ def test_work_directory_is_cleaned_up(env):
 
 
 @needs_cli
+def test_a_killed_attempts_leftovers_do_not_fail_the_retry(env):
+    """被杀掉的尝试留下的工作目录，不能让重领的那一次物化失败。
+
+    ``systemctl restart`` 时 finally 不会跑，目录留在盘上；事务回滚，任务
+    回到 queued、attempts 归零。这里直接摆出那个现场：一条 queued 任务，
+    加上它上一次尝试物化出来的目录。
+    """
+    with session_scope() as db:
+        task_id = task_queue.enqueue(
+            db, source=ContentSource.LOCAL, skill_id=SKILL_ID, skill_name=SKILL_ID
+        ).id
+    stale = env.work_root / task_id / "skill" / "skills" / SKILL_ID
+    stale.mkdir(parents=True)
+    (stale / "SKILL.md").write_text(SKILL_MD, encoding="utf-8")
+    (stale / "left-by-last-attempt.md").write_text("stale\n", encoding="utf-8")
+
+    assert run_once(
+        settings=env,
+        content_sources={ContentSource.LOCAL: LocalDirectorySource(env.local_skills_root)},
+        storage=LocalReportStorage(env.report_root),
+    )
+
+    with session_scope() as db:
+        from skillprism.models import EvaluationTask
+
+        task = db.get(EvaluationTask, task_id)
+        assert task.state == "done", task.error
+        assert task.attempts == 1
+        dto = get_evaluation(db, ContentSource.LOCAL, SKILL_ID)
+    assert dto is not None and dto.status is not EvaluationStatus.ERROR
+    assert not (env.work_root / task_id).exists()
+
+
+@needs_cli
 def test_missing_skill_fails_task_without_result(env):
     """取不到内容时任务应当失败，且不写入任何结果。
 

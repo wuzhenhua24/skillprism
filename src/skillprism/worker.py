@@ -73,6 +73,7 @@ def process_task(
     work_dir = settings.work_root / task.id
     skill_dir = work_dir / "skill"
     out_dir = work_dir / "reports"
+    discard_leftovers(work_dir)
 
     if task.bundle:
         try:
@@ -180,6 +181,21 @@ def process_task(
         return dto.status
     finally:
         cleanup(work_dir)
+
+
+def discard_leftovers(work_dir) -> None:
+    """领到任务后先删掉这条任务自己的工作目录。
+
+    正常结束时 ``finally`` 会删，但进程被直接杀掉时（``systemctl restart``
+    发 SIGTERM，Python 默认不跑 finally）目录会留下来；而整次尝试在同一个
+    事务里，被杀的尝试连同 attempts 一起回滚，任务回到 queued 等着被重领。
+    重领时物化层对非空目录 fail-closed，任务就以"物化失败"终结了。
+
+    删的只是 ``work_root/<task.id>``：它只属于这条任务，领取时的行锁保证
+    同一时刻只有一个 worker 拿着它，所以里面的东西只可能是本任务上一次
+    尝试的残留。物化层的 fail-closed 保持不动——它防的是别的来源的目录。
+    """
+    cleanup(work_dir)
 
 
 def resolve_task_source(

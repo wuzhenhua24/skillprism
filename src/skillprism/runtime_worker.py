@@ -51,6 +51,7 @@ from skillprism.skillup import (
 from skillprism.storage import ReportStorage, iteration_file_name
 from skillprism.worker import (
     _requeue,
+    discard_leftovers,
     fetch_task_files,
     resolve_task_source,
     task_skill_name,
@@ -94,6 +95,10 @@ def process_runtime_task(
     ready: RuntimeReady,
 ) -> EvaluationStatus:
     """处理一个 tier3 任务。返回最终对外状态。"""
+    work_dir = settings.work_root / task.id
+    # 沙箱 worker 一次尝试动辄几十分钟，改完配置就重启，最容易留下残留。
+    discard_leftovers(work_dir)
+
     resolved = resolve_task_source(session, task, content_sources)
     if resolved is None:
         return EvaluationStatus.ERROR
@@ -131,7 +136,6 @@ def process_runtime_task(
             task_queue.finish(session, task)
             return EvaluationStatus(reusable.status)
 
-    work_dir = settings.work_root / task.id
     try:
         return _evaluate(
             session,
