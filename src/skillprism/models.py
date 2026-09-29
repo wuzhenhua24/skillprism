@@ -183,3 +183,79 @@ class EvaluationDetail(Base):
     errors: Mapped[list] = mapped_column(JSON, default=list)
 
     result: Mapped[EvaluationResult] = relationship(back_populates="details")
+
+
+class RuntimeResult(Base):
+    """运行时评测（Tier 3）的结论。设计见 docs/runtime-evaluation.md §8。
+
+    **不能写进 evaluation_result。** 那张表的身份
+    ``(source, skill_id, content_hash, context_hash)`` 里没有 tier，
+    ``save_result`` 又是先删后插：同一份内容的 Tier 3 结论一落库，Tier 1 那条
+    就被删了，全程不报错。字段也对不上——score、grade、gate_passed、
+    incomplete_scans 全是 Tier 1 的概念，硬塞会让每一列都有两种含义。
+
+    身份是 ``(source, skill_id, content_hash, runtime_fingerprint)``。指纹进
+    身份是因为同一份内容换个模型或换个迭代次数评出来的是另一条结论，覆盖掉
+    就丢了一份确实评过的结果。本期没有 bundle，所以没有 ``context_hash``，
+    也就没有 NULL 进唯一键的问题（对比 evaluation_result 那两条部分索引）；
+    将来支持 bundle 时照那边拆。
+    """
+
+    __tablename__ = "runtime_result"
+    __table_args__ = (
+        Index(
+            "uq_runtime_identity",
+            "source",
+            "skill_id",
+            "content_hash",
+            "runtime_fingerprint",
+            unique=True,
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    source: Mapped[str] = mapped_column(String(16), index=True)
+    skill_id: Mapped[str] = mapped_column(String(255), index=True)
+    skill_version: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    #: 与 Tier 1 同一个算法：用例属于内容，改用例就换 hash，Tier 3 就重跑。
+    content_hash: Mapped[str] = mapped_column(String(80), index=True)
+    #: 执行配置的指纹，见 skillup.runtime_fingerprint。复用必须精确相等。
+    runtime_fingerprint: Mapped[str] = mapped_column(String(80), index=True)
+
+    status: Mapped[str] = mapped_column(String(16), index=True)
+    #: 全部用例、全部迭代的运行次数。判状态只看这四个数（见
+    #: runtime_adapter.determine_status），退出码和 run_finished.status 都不算。
+    passed: Mapped[int] = mapped_column(Integer, default=0)
+    failed: Mapped[int] = mapped_column(Integer, default=0)
+    errored: Mapped[int] = mapped_column(Integer, default=0)
+    skipped: Mapped[int] = mapped_column(Integer, default=0)
+    case_count: Mapped[int] = mapped_column(Integer, default=0)
+    iterations: Mapped[int] = mapped_column(Integer, default=1)
+
+    #: 指纹的原料，单独存以便展示和排查——指纹本身是个看不懂的摘要。
+    skillup_version: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    engine: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    engine_version: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    model: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    judge_model: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    #: 网关实际应答的模型，从 transcript 里尽力而为地取。请求的是别名
+    #: （deepseek-v4-flash），应答的是具体版本（…-ga-260731）；它跑之前拿不到，
+    #: 进不了指纹，所以记下来给人看，漂移了用 force=true 重跑。
+    served_models: Mapped[list] = mapped_column(JSON, default=list)
+
+    input_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    output_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    judge_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    duration_ms: Mapped[int] = mapped_column(Integer, default=0)
+
+    #: 每个用例的明细（ID、标题、每次运行的状态与失败原因）。以 JSON 存，
+    #: 结构跟着 schemas.RuntimeCaseResult 走，不拍平成列。
+    cases: Mapped[list] = mapped_column(JSON, default=list)
+
+    report_json_uri: Mapped[str | None] = mapped_column(Text, nullable=True)
+    report_html_uri: Mapped[str | None] = mapped_column(Text, nullable=True)
+    events_uri: Mapped[str | None] = mapped_column(Text, nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    evaluated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)

@@ -14,7 +14,13 @@ from typing import Protocol
 
 class ReportStorage(Protocol):
     def put(
-        self, content_hash: str, name: str, source: Path, *, context_hash: str | None = None
+        self,
+        content_hash: str,
+        name: str,
+        source: Path,
+        *,
+        context_hash: str | None = None,
+        variant: str | None = None,
     ) -> str:
         """存入一份报告，返回可回读的 URI。
 
@@ -22,6 +28,10 @@ class ReportStorage(Protocol):
         为 None。同一份内容在两种上下文下的报告内容不同（跨 skill 链接一边
         是死链一边不是），寻址不带上它，后跑的那次会覆盖前一次，而前一次的
         结果行还指着这个地址——界面上就会看到一份和结论对不上的报告。
+
+        ``variant`` 是同一份内容下的另一类报告，目前只有运行时评测用它
+        （``runtime-<指纹前缀>``）。Tier 1 与 Tier 3 的报告都叫 ``report.html``，
+        不分开放就会互相覆盖——两张结果表各自指着同一个文件，谁后写谁赢。
         """
         ...
 
@@ -37,7 +47,9 @@ class LocalReportStorage:
         # 必须绝对化：URI 无法表达相对路径，而 report_root 默认是 ./var/reports。
         self.root = Path(root).resolve()
 
-    def _dir_for(self, content_hash: str, context_hash: str | None) -> Path:
+    def _dir_for(
+        self, content_hash: str, context_hash: str | None, variant: str | None = None
+    ) -> Path:
         """报告目录由 (content_hash, context_hash) 决定，按前两位分桶避免单目录文件过多。
 
         注意路径里**没有 skill_id**：两个内容字节相同的 skill 会共用同一个
@@ -55,14 +67,22 @@ class LocalReportStorage:
         """
         digest = content_hash.split(":", 1)[-1]
         base = self.root / digest[:2] / digest
-        if context_hash is None:
-            return base
-        return base / f"ctx-{context_hash.split(':', 1)[-1][:16]}"
+        if context_hash is not None:
+            base = base / f"ctx-{context_hash.split(':', 1)[-1][:16]}"
+        if variant is not None:
+            base = base / variant
+        return base
 
     def put(
-        self, content_hash: str, name: str, source: Path, *, context_hash: str | None = None
+        self,
+        content_hash: str,
+        name: str,
+        source: Path,
+        *,
+        context_hash: str | None = None,
+        variant: str | None = None,
     ) -> str:
-        target_dir = self._dir_for(content_hash, context_hash)
+        target_dir = self._dir_for(content_hash, context_hash, variant)
         target_dir.mkdir(parents=True, exist_ok=True)
         target = target_dir / name
         shutil.copy2(source, target)
