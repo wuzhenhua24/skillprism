@@ -44,7 +44,8 @@ if args[:1] == ["run"]:
     lines = (scenario / "events.jsonl").read_text().splitlines(keepends=True)
     if control.get("drop_run_finished"):
         lines = [l for l in lines if '"run_finished"' not in l]
-    events.write_text("".join(lines))
+    # 场景可以用 @WORK@ 占位真实工作目录，测路径有没有被去掉。
+    events.write_text("".join(lines).replace("@WORK@", str(events.parent)))
     sys.exit(control.get("run_exit", 0))
 sys.exit(2)
 '''

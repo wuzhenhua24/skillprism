@@ -18,6 +18,7 @@ from skillprism.schemas import (
     RuntimeCaseResult,
     RuntimeEvaluationDTO,
     RuntimeInfo,
+    RuntimeIterationReport,
     TierBundle,
     TierResult,
     ValidatorOutcome,
@@ -586,9 +587,13 @@ def clone_runtime_result(
 
 
 def runtime_result_to_dto(
-    row: RuntimeResult, *, report_url: str | None = None
+    row: RuntimeResult,
+    *,
+    report_url: str | None = None,
+    iteration_reports: list[RuntimeIterationReport] | None = None,
+    events_url: str | None = None,
 ) -> RuntimeEvaluationDTO:
-    """``report_url`` 由调用方给，不回落到存储地址，理由同 :func:`result_to_dto`。"""
+    """几个链接都由调用方给，不回落到存储地址，理由同 :func:`result_to_dto`。"""
     total = row.passed + row.failed + row.errored + row.skipped
     return RuntimeEvaluationDTO(
         skill_id=row.skill_id,
@@ -618,6 +623,8 @@ def runtime_result_to_dto(
         duration_ms=row.duration_ms,
         cases=[RuntimeCaseResult.model_validate(c) for c in (row.cases or [])],
         report_url=report_url,
+        iteration_reports=list(iteration_reports or []),
+        events_url=events_url,
         error=row.error,
     )
 

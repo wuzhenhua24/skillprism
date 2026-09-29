@@ -54,7 +54,8 @@
 | GET | `/api/skills/{skill_id}/evaluation` | 取一条结论 | `200` |
 | GET | `/api/skills/{skill_id}/report` | 取 HTML 报告 | `200` |
 | GET | `/api/skills/{skill_id}/runtime-evaluation` | 取一条运行时评测（Tier 3）结论，见 §13 | `200` |
-| GET | `/api/skills/{skill_id}/runtime-report` | 取运行时评测的 HTML 报告，见 §13 | `200` |
+| GET | `/api/skills/{skill_id}/runtime-report` | 取运行时评测某一轮的 HTML 报告，见 §13 | `200` |
+| GET | `/api/skills/{skill_id}/runtime-events` | 取运行时评测的事件流，见 §13 | `200` |
 | GET | `/healthz` | 健康检查 + 扫描器齐备情况 | `200` |
 
 `POST /embed/v1/embeddings` 也在同一个进程里，但它是给评测子进程用的内部 shim，
@@ -692,6 +693,11 @@ POST /api/evaluations/gitlab
                "reason": "output_matches.all: missing [(?m)^P0\\s*$]：output does not match required regex patterns"}]}
   ],
   "report_url": "https://skillprism.internal/api/skills/group/repo:skills/log-triage/runtime-report?source=gitlab&content_hash=sha256%3A9f2c…&fingerprint=sha256%3A5b1e…",
+  "iteration_reports": [
+    {"iteration": 1,
+     "report_url": "https://skillprism.internal/api/skills/group/repo:skills/log-triage/runtime-report?source=gitlab&content_hash=sha256%3A9f2c…&fingerprint=sha256%3A5b1e…"}
+  ],
+  "events_url": "https://skillprism.internal/api/skills/group/repo:skills/log-triage/runtime-events?source=gitlab&content_hash=sha256%3A9f2c…&fingerprint=sha256%3A5b1e…",
   "error": null
 }
 ```
@@ -705,7 +711,9 @@ POST /api/evaluations/gitlab
 | `runtime.served_models` | 网关实际应答的模型。请求的是别名，应答的是具体版本；取不到为空列表 |
 | `cases[].runs[].status` | skill-up 的原始判定：`PASS` / `FAIL` / `ERROR` / `SKIP` |
 | `cases[].runs[].reason` | 没通过的原因：FAIL 是没满足的断言，ERROR / SKIP 是出错原因 |
-| `report_url` | 钉住 `content_hash` 与 `fingerprint`，理由同 §7 |
+| `report_url` | **第一轮**的报告，钉住 `content_hash` 与 `fingerprint`，理由同 §7 |
+| `iteration_reports` | skill-up 每轮迭代单独出一份报告，这里按轮列出，第一项与 `report_url` 相同。`cases[].runs[].iteration` 是哪一轮，就去那一轮的报告里看过程。某一轮没有报告就不列 |
+| `events_url` | 事件流，覆盖全部迭代，见 §13.5。没存下时为 `null` |
 
 **同样的内容、同样的执行配置不会重跑**：结论按内容复用，和 Tier 1 一样不看 `skill_id`。
 模型、engine 版本、迭代次数等任何一项变了都会重跑。网关在同一个模型名背后换了版本时
@@ -713,6 +721,17 @@ POST /api/evaluations/gitlab
 
 ### 13.4 `GET /api/skills/{skill_id}/runtime-report`
 
-参数同 §13.3，回 skill-up 生成的 HTML 报告，响应头同 §7。**报告里有用例的 prompt 和
-agent 的完整回复**，承载要求同 §7：独立域名、不要内联进管理系统的 DOM。
+参数同 §13.3，另加 `iteration`（从 1 起，不带是第一轮），回 skill-up 生成的那一轮的
+HTML 报告，响应头同 §7。**报告里有用例的 prompt 和 agent 的完整回复**，承载要求同 §7：
+独立域名、不要内联进管理系统的 DOM。
+
+`iteration` 超过这条结论实际跑的轮数时回 `404`，`detail` 里写明跑了几轮；小于 1 回 `422`。
+链接直接用 `iteration_reports[].report_url`，不用自己拼。
+
+### 13.5 `GET /api/skills/{skill_id}/runtime-events`
+
+参数同 §13.3，回 skill-up 的事件流：JSON Lines，每行一个事件，格式是 skill-up 的
+`schemas/evalevent/v1`（`protocol_version` / `event_version` 均为 1）。`Content-Type` 为
+`application/x-ndjson`，响应头同 §7。覆盖全部迭代，结论里的计数和每次运行的判定都出自
+它，要核对或自己重放时用。工作目录路径已去掉。
 

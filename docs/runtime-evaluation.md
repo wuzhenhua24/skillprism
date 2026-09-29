@@ -402,17 +402,25 @@ bundle，所以不需要 `context_hash`，也就没有 NULL 的问题，一条�
 （Tier 1 任务为 null）：同一份内容换个模型评过就有两条结论，只给 `content_hash`
 钥匙就不够了。
 
-**查询**，新增两个端点：
+**查询**，新增三个端点：
 
 ```
 GET /api/skills/{skill_id}/runtime-evaluation?source=&content_hash=&fingerprint=
-GET /api/skills/{skill_id}/runtime-report?source=&content_hash=&fingerprint=
+GET /api/skills/{skill_id}/runtime-report?source=&content_hash=&fingerprint=&iteration=
+GET /api/skills/{skill_id}/runtime-events?source=&content_hash=&fingerprint=
 ```
 
 规则照搬 `/evaluation`：多来源时必须带 `source`；带 `content_hash` 时精确取，
 不带时退回最近一条（GitLab 接入下同样多半不是你要的）。同一份内容在多个指纹下
 都评过时，不带 `fingerprint` 取最近一条；`report_url` 里三个参数都钉住。返回的 `RuntimeEvaluationDTO` 包含状态、计数、通过率、
 每个用例的明细、执行配置（engine、模型、实际应答的模型）、token、耗时、`report_url`。
+
+**多轮迭代**：skill-up 每轮出一份 `report.html` / `result.json`。库里只记第一轮的地址，
+`report_url` 指向它，不带 `iteration` 参数，和加参数之前发出去的链接一致。其余几轮
+入存储时带序号放在同一目录（`report-2.html` …，见 `storage.iteration_file_name`），取的时候
+按同一规则推出来，所以不需要加列，早先存下的结论同样可取。DTO 里 `iteration_reports`
+列出文件确实在的每一轮报告，`events_url` 指向覆盖全部迭代的事件流
+（`/runtime-events`，入存储前去掉工作目录，理由同 `reason`）。`result.json` 本期不对外。
 
 **`EvaluationDTO.tiers.tier3`**（已预留）：`/evaluation` 返回 Tier 1 结论时，
 顺带查同一 `(source, skill_id, content_hash)` 下最近的一条运行时结论，摘要填进

@@ -135,6 +135,14 @@ class RuntimeCaseResult(BaseModel):
     runs: list[RuntimeCaseRun] = Field(default_factory=list)
 
 
+class RuntimeIterationReport(BaseModel):
+    """一轮迭代的 HTML 报告。skill-up 每轮单独出一份，里面是这一轮每个用例的
+    prompt、agent 回复与 grading 明细——``cases[].runs[]`` 里判定与原因的出处。"""
+
+    iteration: int
+    report_url: str
+
+
 class RuntimeInfo(BaseModel):
     """这条结论是在什么配置下跑出来的。分数变了，第一个要问的就是它变没变。"""
 
@@ -177,7 +185,14 @@ class RuntimeEvaluationDTO(BaseModel):
     duration_ms: int = 0
     cases: list[RuntimeCaseResult] = Field(default_factory=list)
     #: 同 :attr:`EvaluationDTO.report_url`，钉住这条结论的 content_hash 与指纹。
+    #: 这是**第一轮**的报告；迭代多于一次时其余几轮在 :attr:`iteration_reports`。
     report_url: str | None = None
+    #: 每一轮各自的报告，按迭代序号排列，第一项与 ``report_url`` 相同。某一轮
+    #: 没有报告（skill-up 没写出来）就不列——不给点开是 404 的链接。
+    iteration_reports: list[RuntimeIterationReport] = Field(default_factory=list)
+    #: skill-up 的事件流（JSON Lines，``schemas/evalevent/v1``），覆盖全部迭代。
+    #: 计数与每次运行的判定都出自它。没配公开地址或没存下时为 null。
+    events_url: str | None = None
     error: str | None = None
 
 

@@ -159,6 +159,85 @@ def test_runtime_report_is_served_with_the_security_headers(client, tmp_path):
         assert resp.headers[name] == value
 
 
+def _three_iteration_row(tmp_path: Path, *, missing: int | None = None) -> RuntimeResult:
+    """一条跑了三轮的结论，文件照 worker 入存储的样子放：第一轮原名，其余带序号。"""
+    directory = tmp_path / f"stored-{uuid.uuid4().hex}"
+    directory.mkdir()
+    for n, name in ((1, "report.html"), (2, "report-2.html"), (3, "report-3.html")):
+        if n != missing:
+            (directory / name).write_text(f"<html>iter {n}</html>")
+    (directory / "events.jsonl").write_text('{"event":"run_finished"}\n')
+    return _runtime_row(
+        tmp_path,
+        iterations=3,
+        report_html_uri=(directory / "report.html").as_uri(),
+        events_uri=(directory / "events.jsonl").as_uri(),
+    )
+
+
+PINNED = {"content_hash": "sha256:c1", "fingerprint": "sha256:fp-a"}
+
+
+def test_every_iteration_has_its_own_report_link(client, tmp_path):
+    _three_iteration_row(tmp_path)
+    body = client.get("/api/skills/2000705/runtime-evaluation", params=PINNED).json()
+
+    base = (
+        f"{PUBLIC}/api/skills/2000705/runtime-report"
+        "?source=local&content_hash=sha256%3Ac1&fingerprint=sha256%3Afp-a"
+    )
+    assert body["report_url"] == base, "第一轮的链接和加迭代参数之前一样，发出去的不失效"
+    assert body["iteration_reports"] == [
+        {"iteration": 1, "report_url": base},
+        {"iteration": 2, "report_url": f"{base}&iteration=2"},
+        {"iteration": 3, "report_url": f"{base}&iteration=3"},
+    ]
+    assert body["events_url"] == base.replace("runtime-report", "runtime-events")
+
+
+def test_an_iteration_without_a_report_is_not_listed(client, tmp_path):
+    _three_iteration_row(tmp_path, missing=2)
+    body = client.get("/api/skills/2000705/runtime-evaluation", params=PINNED).json()
+    assert [r["iteration"] for r in body["iteration_reports"]] == [1, 3]
+
+
+def test_runtime_report_serves_the_requested_iteration(client, tmp_path):
+    _three_iteration_row(tmp_path)
+    url = "/api/skills/2000705/runtime-report"
+    assert client.get(url, params=PINNED).text == "<html>iter 1</html>"
+    resp = client.get(url, params={**PINNED, "iteration": 3})
+    assert resp.text == "<html>iter 3</html>"
+    for name, value in REPORT_SECURITY_HEADERS.items():
+        assert resp.headers[name] == value
+
+
+def test_runtime_report_beyond_the_last_iteration_says_how_many_ran(client, tmp_path):
+    _three_iteration_row(tmp_path)
+    url = "/api/skills/2000705/runtime-report"
+    resp = client.get(url, params={**PINNED, "iteration": 4})
+    assert resp.status_code == 404
+    assert "3 轮" in resp.json()["detail"]
+    assert client.get(url, params={**PINNED, "iteration": 0}).status_code == 422
+
+
+def test_runtime_events_are_served_as_json_lines(client, tmp_path):
+    _three_iteration_row(tmp_path)
+    resp = client.get("/api/skills/2000705/runtime-events", params=PINNED)
+    assert resp.status_code == 200
+    assert resp.headers["content-type"].startswith("application/x-ndjson")
+    assert resp.text == '{"event":"run_finished"}\n'
+    for name, value in REPORT_SECURITY_HEADERS.items():
+        assert resp.headers[name] == value
+
+
+def test_runtime_events_404_without_an_event_log(client, tmp_path):
+    _runtime_row(tmp_path)
+    body = client.get("/api/skills/2000705/runtime-evaluation", params=PINNED).json()
+    assert body["events_url"] is None
+    resp = client.get("/api/skills/2000705/runtime-events", params=PINNED)
+    assert resp.status_code == 404
+
+
 def test_tier1_evaluation_carries_a_tier3_summary(client, tmp_path):
     """预留的 tiers.tier3 分区：详情页不用改接口就能展示一块。"""
     with session_scope() as db:

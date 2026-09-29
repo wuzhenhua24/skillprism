@@ -38,6 +38,7 @@ from skillprism.runtime_adapter import (
     build_outcome,
     iteration_dirs,
     read_events,
+    scrub_text,
 )
 from skillprism.skillup import (
     CaseError,
@@ -47,7 +48,7 @@ from skillprism.skillup import (
     probe_gateway,
     run_skillup,
 )
-from skillprism.storage import ReportStorage
+from skillprism.storage import ReportStorage, iteration_file_name
 from skillprism.worker import (
     _requeue,
     fetch_task_files,
@@ -219,7 +220,9 @@ def _evaluate(
         _requeue(session, task, settings, outcome.error or "全部用例都没被判定")
         return EvaluationStatus.ERROR
 
-    uris = _store_reports(storage, run, content_hash, profile.fingerprint, settings.runtime_iterations)
+    uris = _store_reports(
+        storage, run, content_hash, profile.fingerprint, settings.runtime_iterations, scrub
+    )
     row = _to_row(
         task,
         source=source,
@@ -236,22 +239,34 @@ def _evaluate(
 
 
 def _store_reports(
-    storage: ReportStorage, run, content_hash: str, fingerprint: str, iterations: int
+    storage: ReportStorage,
+    run,
+    content_hash: str,
+    fingerprint: str,
+    iterations: int,
+    scrub_prefixes: list[str],
 ) -> dict[str, str | None]:
     """报告入存储。第一个迭代的 report.html / result.json 是结论指向的那份；
-    迭代多于一次时，其余的带上序号一并存下，事件流覆盖全部迭代。"""
+    迭代多于一次时，其余的按 :func:`storage.iteration_file_name` 带上序号放在
+    同一目录，取的时候照同一规则推出来。事件流覆盖全部迭代。"""
     variant = storage_variant(fingerprint)
     uris: dict[str, str | None] = {"html": None, "json": None, "events": None}
     if run.events_path.is_file():
-        uris["events"] = storage.put(content_hash, "events.jsonl", run.events_path, variant=variant)
+        # 事件流会经 /runtime-events 原样交给对接方。v1 的字段里没有路径，
+        # 但去掉工作目录的成本很低，免得哪天 skill-up 往事件里加了出错信息
+        # 就把服务器目录结构带出去——reason 也是这么处理的。
+        scrubbed = run.events_path.with_name("events.scrubbed.jsonl")
+        text = run.events_path.read_text(encoding="utf-8")
+        scrubbed.write_text(scrub_text(text, scrub_prefixes), encoding="utf-8")
+        uris["events"] = storage.put(content_hash, "events.jsonl", scrubbed, variant=variant)
     for number, directory in enumerate(iteration_dirs(run.out_dir, iterations), start=1):
-        suffix = "" if number == 1 else f"-{number}"
         for name, key in (("report.html", "html"), ("result.json", "json")):
             path = directory / name
             if not path.is_file():
                 continue
-            stem, ext = name.rsplit(".", 1)
-            uri = storage.put(content_hash, f"{stem}{suffix}.{ext}", path, variant=variant)
+            uri = storage.put(
+                content_hash, iteration_file_name(name, number), path, variant=variant
+            )
             if number == 1:
                 uris[key] = uri
     return uris

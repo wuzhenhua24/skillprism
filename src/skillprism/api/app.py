@@ -6,7 +6,7 @@ from pathlib import Path
 
 from contextlib import asynccontextmanager
 
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
@@ -409,6 +409,7 @@ def get_runtime_report(
     source: str | None = None,
     content_hash: str | None = None,
     fingerprint: str | None = None,
+    iteration: int = Query(1, ge=1),
     session: Session = Depends(get_db),
 ) -> FileResponse:
     """回传 skill-up 生成的 HTML 报告。
@@ -417,13 +418,48 @@ def get_runtime_report(
     prompt 与 agent 的完整回复），同样只在独立域名下、带
     :data:`REPORT_SECURITY_HEADERS` 提供。三个参数与 ``/runtime-evaluation``
     同义，两边必须一起带。
+
+    skill-up 每轮迭代出一份报告，``iteration`` 选哪一轮，不带是第一轮。
     """
     kind = query_source(source)
     row = service.lookup_runtime_result(
         session, kind, skill_id, content_hash=content_hash, fingerprint=fingerprint
     )
-    path = service.report_path(row.report_html_uri) if row else None
+    if row is None:
+        raise HTTPException(status_code=404, detail="该 skill 没有对应的运行时评测结果")
+    if iteration > row.iterations:
+        raise HTTPException(
+            status_code=404,
+            detail=f"这条结论只跑了 {row.iterations} 轮，没有第 {iteration} 轮的报告",
+        )
+    path = service.report_path(service.runtime_report_uri(row, iteration))
     if path is None:
-        detail = "报告不存在" if row else "该 skill 没有对应的运行时评测结果"
-        raise HTTPException(status_code=404, detail=detail)
+        raise HTTPException(status_code=404, detail="报告不存在")
     return FileResponse(path, media_type="text/html", headers=REPORT_SECURITY_HEADERS)
+
+
+@app.get("/api/skills/{skill_id:path}/runtime-events")
+def get_runtime_events(
+    skill_id: str,
+    source: str | None = None,
+    content_hash: str | None = None,
+    fingerprint: str | None = None,
+    session: Session = Depends(get_db),
+) -> FileResponse:
+    """回传 skill-up 的事件流（JSON Lines，``schemas/evalevent/v1``），覆盖全部迭代。
+
+    结论里的计数和每次运行的判定都出自它，对接方要核对或自己重放时用。
+    参数同 ``/runtime-report``。内容里有用例标题这类作者写的文本，响应头照
+    报告那一组给，``nosniff`` 保证它不会被浏览器当成 HTML 渲染。
+    """
+    kind = query_source(source)
+    row = service.lookup_runtime_result(
+        session, kind, skill_id, content_hash=content_hash, fingerprint=fingerprint
+    )
+    path = service.report_path(row.events_uri) if row else None
+    if path is None:
+        detail = "事件流不存在" if row else "该 skill 没有对应的运行时评测结果"
+        raise HTTPException(status_code=404, detail=detail)
+    return FileResponse(
+        path, media_type="application/x-ndjson", headers=REPORT_SECURITY_HEADERS
+    )

@@ -12,6 +12,18 @@ from pathlib import Path
 from typing import Protocol
 
 
+def iteration_file_name(name: str, iteration: int) -> str:
+    """第 N 轮运行时报告在存储里的文件名：第一轮原名，其余带序号（``report-2.html``）。
+
+    库里只记第一轮的地址，其余几轮靠这个约定从同一目录下推出来——入存储
+    （runtime_worker）和取报告（service）两边必须用同一个规则。
+    """
+    if iteration == 1:
+        return name
+    stem, ext = name.rsplit(".", 1)
+    return f"{stem}-{iteration}.{ext}"
+
+
 class ReportStorage(Protocol):
     def put(
         self,

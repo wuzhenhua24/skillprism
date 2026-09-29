@@ -7,6 +7,7 @@ skill-up 换成一个回放真实输出的替身（tests/skillup_fake.py），�
 
 from __future__ import annotations
 
+import shutil
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
@@ -22,11 +23,11 @@ from skillprism.queue import enqueue
 from skillprism.runtime_worker import make_process_runtime_task
 from skillprism.schemas import EvaluationDTO, EvaluatorInfo
 from skillprism.repository import save_result
-from skillprism.service import get_evaluation, task_results
+from skillprism.service import get_evaluation, get_runtime_evaluation, task_results
 from skillprism.skillup import NO_CASES_PREFIX, RuntimeProfile, RuntimeReady
 from skillprism.storage import LocalReportStorage
 from skillprism.worker import run_once
-from tests.skillup_fake import FakeSkillup, fake_claude
+from tests.skillup_fake import FIXTURES, FakeSkillup, fake_claude
 
 MOCK_SKILL = Path(__file__).parent / "fixtures" / "runtime_skill" / "ticket-formatter"
 SKILL_ID = "group/repo:skills/ticket-formatter"
@@ -248,6 +249,54 @@ def test_three_iterations_store_every_iterations_files(env, monkeypatch):
     assert {"result.json", "result-2.json", "result-3.json", "events.jsonl"} <= {
         p.name for p in stored.iterdir()
     }
+
+
+def test_every_iterations_report_is_reachable_over_http(env, monkeypatch, tmp_path):
+    """库里只记第一轮的报告，其余几轮靠命名约定从同一目录推出来。入存储
+    与取报告两边的约定要对得上，否则迭代 2、3 的报告存下了却没有出口。"""
+    monkeypatch.setenv("SKILLPRISM_RUNTIME_ITERATIONS", "3")
+    reset_settings()
+    _, fake, ready, probe = env
+    env = (get_settings(), fake, ready, probe)
+    scenario = tmp_path / "scenario"
+    shutil.copytree(FIXTURES / "iterations", scenario)
+    for n in (1, 2, 3):
+        (scenario / "out" / f"iteration-{n}" / "report.html").write_text(f"<html>iter {n}</html>")
+    fake.set(scenario=str(scenario))
+    _enqueue()
+    _run(env)
+
+    with session_scope() as db:
+        dto = get_runtime_evaluation(
+            db, ContentSource.LOCAL, SKILL_ID, public_base_url="https://prism.internal"
+        )
+    assert [r.iteration for r in dto.iteration_reports] == [1, 2, 3]
+    assert dto.iteration_reports[0].report_url == dto.report_url
+    assert dto.iteration_reports[2].report_url.endswith("&iteration=3")
+    assert dto.events_url is not None
+
+    [row] = _rows()
+    storage_dir = Path(LocalReportStorage(get_settings().report_root).resolve(row.report_html_uri)).parent
+    assert (storage_dir / "report-3.html").read_text() == "<html>iter 3</html>"
+
+
+def test_the_stored_event_log_does_not_carry_the_work_dir(env, tmp_path):
+    """事件流会原样交给对接方，工作目录要和 reason 一样去掉。"""
+    _, fake, _, _ = env
+    scenario = tmp_path / "scenario"
+    shutil.copytree(FIXTURES / "passed", scenario)
+    events = scenario / "events.jsonl"
+    events.write_text(events.read_text().replace(
+        '"title":"', '"title":"@WORK@/skill ', 1
+    ))
+    fake.set(scenario=str(scenario))
+    _enqueue()
+    _run(env)
+
+    [row] = _rows()
+    stored = LocalReportStorage(get_settings().report_root).resolve(row.events_uri).read_text()
+    assert str(get_settings().work_root) not in stored
+    assert '"title":"skill ' in stored
 
 
 def test_a_run_where_nothing_was_judged_is_retried_without_a_result(env):

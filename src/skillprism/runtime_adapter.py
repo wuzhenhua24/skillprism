@@ -162,7 +162,7 @@ def _load_json(path: Path) -> dict[str, Any] | None:
     return loaded if isinstance(loaded, dict) else None
 
 
-def _scrub(text: str, prefixes: list[str]) -> str:
+def scrub_text(text: str, prefixes: list[str]) -> str:
     for prefix in prefixes:
         text = text.replace(prefix + "/", "").replace(prefix, "")
     return text
@@ -275,7 +275,7 @@ def build_outcome(
             RuntimeCaseRun(
                 iteration=number,
                 status=status,
-                reason=_scrub(reason, prefixes) if reason else None,
+                reason=scrub_text(reason, prefixes) if reason else None,
             )
         )
 

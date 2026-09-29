@@ -32,11 +32,13 @@ from skillprism.schemas import (
     EvaluationDTO,
     GitLabSubmitRequest,
     RuntimeEvaluationDTO,
+    RuntimeIterationReport,
     SubmitRequest,
     SubmitResponse,
     TaskDTO,
     TaskResultRef,
 )
+from skillprism.storage import iteration_file_name
 
 
 def validate_skill_name(name: str) -> None:
@@ -287,19 +289,71 @@ def lookup_runtime_result(
     return latest_runtime_result(session, source, skill_id)
 
 
-def runtime_report_url_for(row: RuntimeResult, public_base_url: str) -> str | None:
-    """运行时报告的公开地址。钉住 source、content_hash 与指纹，理由同 :func:`report_url_for`。"""
-    if not public_base_url or not row.report_html_uri:
+def runtime_report_uri(row: RuntimeResult, iteration: int = 1) -> str | None:
+    """第 ``iteration`` 轮 HTML 报告的存储地址；这条结论没跑到这一轮时为 None。
+
+    库里只记第一轮的地址。其余几轮入存储时按 :func:`storage.iteration_file_name`
+    放在同一目录下，从第一轮的地址推出来——不加列，这个约定上线前存下的结论
+    同样适用。推出来的文件不一定存在（skill-up 那一轮没写报告），调用方自己查。
+    """
+    if not row.report_html_uri or not 1 <= iteration <= row.iterations:
         return None
+    if iteration == 1:
+        return row.report_html_uri
+    directory, _, name = row.report_html_uri.rpartition("/")
+    return f"{directory}/{iteration_file_name(name, iteration)}"
+
+
+def _runtime_url(
+    row: RuntimeResult, public_base_url: str, endpoint: str, **extra: str
+) -> str:
     path = quote(row.skill_id, safe="/:")
     query = urlencode(
         {
             "source": row.source,
             "content_hash": row.content_hash,
             "fingerprint": row.runtime_fingerprint,
+            **extra,
         }
     )
-    return f"{public_base_url.rstrip('/')}/api/skills/{path}/runtime-report?{query}"
+    return f"{public_base_url.rstrip('/')}/api/skills/{path}/{endpoint}?{query}"
+
+
+def runtime_report_url_for(
+    row: RuntimeResult, public_base_url: str, iteration: int = 1
+) -> str | None:
+    """运行时报告的公开地址。钉住 source、content_hash 与指纹，理由同 :func:`report_url_for`。
+
+    第一轮不带 ``iteration`` 参数：加这个参数之前发出去的链接就是这个样子，
+    它们指的一直是第一轮。
+    """
+    if not public_base_url or not runtime_report_uri(row, iteration):
+        return None
+    extra = {} if iteration == 1 else {"iteration": str(iteration)}
+    return _runtime_url(row, public_base_url, "runtime-report", **extra)
+
+
+def runtime_iteration_reports(
+    row: RuntimeResult, public_base_url: str
+) -> list[RuntimeIterationReport]:
+    """每一轮的报告链接。只列文件确实在的——宁可少一项，也不给点开是 404 的链接。"""
+    if not public_base_url:
+        return []
+    reports = []
+    for iteration in range(1, row.iterations + 1):
+        if report_path(runtime_report_uri(row, iteration)) is None:
+            continue
+        url = runtime_report_url_for(row, public_base_url, iteration)
+        if url:
+            reports.append(RuntimeIterationReport(iteration=iteration, report_url=url))
+    return reports
+
+
+def runtime_events_url_for(row: RuntimeResult, public_base_url: str) -> str | None:
+    """事件流的公开地址，钉法同 :func:`runtime_report_url_for`。"""
+    if not public_base_url or not row.events_uri:
+        return None
+    return _runtime_url(row, public_base_url, "runtime-events")
 
 
 def get_runtime_evaluation(
@@ -316,7 +370,12 @@ def get_runtime_evaluation(
     )
     if row is None:
         return None
-    return runtime_result_to_dto(row, report_url=runtime_report_url_for(row, public_base_url))
+    return runtime_result_to_dto(
+        row,
+        report_url=runtime_report_url_for(row, public_base_url),
+        iteration_reports=runtime_iteration_reports(row, public_base_url),
+        events_url=runtime_events_url_for(row, public_base_url),
+    )
 
 
 def task_results(
