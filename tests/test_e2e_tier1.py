@@ -166,7 +166,7 @@ def test_pipeline_runs_to_completion(env):
     assert dto.evaluator.profile == "internal", "自定义策略没有生效"
     assert dto.evaluator.policy_digest, "缺少策略摘要，无法追溯用了哪套规则"
     assert dto.tiers.tier1 is not None and dto.tiers.tier1.validators
-    # Tier 2/3 未实现，必须是显式的空位而不是被误填
+    # Tier 2 未实现、这个 skill 也没跑过运行时评测，必须是显式的空位而不是被误填
     assert dto.tiers.tier2 is None
     assert dto.tiers.tier3 is None
 
@@ -238,6 +238,50 @@ def test_binary_asset_makes_security_scan_incomplete(env):
     # 对接文档让管理系统去这里取原因，它必须真的在。
     security = [v for v in dto.tiers.tier1.validators if "Security" in v.validator]
     assert security and security[0].errors, "安全扫描没跑全，却没留下原因"
+
+
+@needs_cli
+@needs_scanners
+def test_evals_directory_does_not_change_tier1(env):
+    """作者补运行时用例不影响 Tier 1：SkillEvaluator 在任意层级跳过 ``evals/``。
+
+    放进去的是最能改变结论的三样东西——假 token、带注入漏洞的代码、一张 PNG
+    ——同样的文件放在 ``evals/`` 外面会多出一条 critical、十几条别的问题，
+    PNG 还会让安全扫描判为不完整（见上一条）。在 ``evals/`` 里则一条都不该多。
+
+    这是上游的行为（``constants.SCAN_EXCLUDED_DIRS``），不是我们保证的。哪天它
+    改了，这条会变红，那时 docs/runtime-evaluation.md §2 与给作者的用例约定
+    （"测试材料都放在 evals/ 下"）要跟着改。
+    """
+    before = _evaluate(env)
+
+    evals = env.local_skills_root / SKILL_ID / "evals"
+    (evals / "cases").mkdir(parents=True)
+    (evals / "cases" / "smoke.yaml").write_text(
+        "input:\n  prompt: hi\nexpect:\n  must_contain: [hi]\n", encoding="utf-8"
+    )
+    fixture = evals / "fixtures" / "repos" / "sample"
+    fixture.mkdir(parents=True)
+    (fixture / "app.py").write_text(
+        'import subprocess\n'
+        'GITHUB_TOKEN = "ghp_R8x2Kq9LmZ4vT7wYp3NcB6hJd1sFa0GuE5iO"\n'
+        'def find(conn, name):\n'
+        '    return conn.execute("SELECT * FROM users WHERE name = \'" + name + "\'")\n'
+        'def run(cmd):\n'
+        '    return subprocess.call(cmd, shell=True)\n',
+        encoding="utf-8",
+    )
+    (fixture / "README.md").write_text("See [design](docs/design.md).\n", encoding="utf-8")
+    (evals / "fixtures" / "screenshot.png").write_bytes(_one_pixel_png())
+
+    after = _evaluate(env)
+
+    assert after.content_hash != before.content_hash, "内容变了，这次是真跑而不是复用"
+    assert after.status is before.status
+    assert after.score == before.score
+    assert after.severity_counts == before.severity_counts
+    assert after.evaluator.incomplete_scans == before.evaluator.incomplete_scans
+    assert sorted(_check_names(after)) == sorted(_check_names(before))
 
 
 @needs_cli
