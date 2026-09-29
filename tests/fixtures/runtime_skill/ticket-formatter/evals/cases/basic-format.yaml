@@ -1,0 +1,14 @@
+id: basic-format
+title: Produces the fixed ticket layout
+input:
+  prompt: |
+    Please turn this into a ticket: when I click "Export CSV" on the reports
+    page nothing happens. I tried Chrome and Firefox. Exporting from the API
+    still works.
+expect:
+  must_contain: ["TICKET-V1", "## Summary", "## Severity", "## Steps to Reproduce"]
+judge:
+  type: rule_based
+  success:
+    - output_matches:
+        all: ["(?m)^TICKET-V1\\s*$", "(?m)^P2\\s*$"]

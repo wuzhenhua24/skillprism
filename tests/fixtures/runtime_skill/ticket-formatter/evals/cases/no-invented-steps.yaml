@@ -1,0 +1,12 @@
+id: no-invented-steps
+title: Does not invent reproduction steps
+input:
+  prompt: |
+    Ticket please: customers say their saved drafts disappeared overnight.
+judge:
+  type: agent_judge
+  criteria:
+    - "The reply follows the TICKET-V1 layout with Summary, Severity and Steps to Reproduce sections"
+    - "Severity is P0 because customer data was lost"
+    - "Steps to Reproduce does not invent concrete steps; it says the steps were not provided"
+  pass_threshold: 0.7

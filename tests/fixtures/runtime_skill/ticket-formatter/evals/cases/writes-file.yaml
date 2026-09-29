@@ -1,0 +1,15 @@
+id: writes-file
+title: Saves the ticket to ticket.md
+input:
+  prompt: |
+    Make a ticket from this: the login page shows "Pasword" instead of "Password".
+expect:
+  files_exist: ["ticket.md"]
+  file_contains:
+    - path: ticket.md
+      content: "TICKET-V1"
+judge:
+  type: rule_based
+  success:
+    - output_matches:
+        all: ["(?m)^P3\\s*$"]

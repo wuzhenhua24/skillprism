@@ -1,0 +1,218 @@
+{
+  "skill_name": "run",
+  "schema_version": "v1alpha1",
+  "engine_name": "claude_code",
+  "model_name": "ark/deepseek-v4-flash",
+  "requested_configuration": {
+    "role": "runner",
+    "engine": "claude_code",
+    "protocol": "anthropic",
+    "provider": "ark",
+    "model": "deepseek-v4-flash"
+  },
+  "applied_configuration": {
+    "role": "runner",
+    "engine": "claude_code",
+    "protocol": "anthropic",
+    "provider": "ark",
+    "model": "deepseek-v4-flash"
+  },
+  "observed_configuration": {
+    "version": "2.1.284"
+  },
+  "start_time": "2026-09-29T10:40:43.951994+08:00",
+  "end_time": "2026-09-29T10:41:20.049517+08:00",
+  "case_results": [
+    {
+      "case_id": "basic-format",
+      "title": "Produces the fixed ticket layout",
+      "status": "PASS",
+      "duration_ms": 21750,
+      "turns": 1,
+      "input_tokens": 16250,
+      "output_tokens": 564,
+      "grading": {
+        "status": "PASS",
+        "turns_executed": 1,
+        "turns_total": 1,
+        "assertion_results": [
+          {
+            "text": "expect.must_contain",
+            "passed": true,
+            "evidence": "all checks passed"
+          },
+          {
+            "text": "output_matches{all:[(?m)^TICKET-V1\\s*$ (?m)^P2\\s*$]}",
+            "passed": true,
+            "evidence": "output satisfies all regex checks (all:[(?m)^TICKET-V1\\s*$ (?m)^P2\\s*$])"
+          }
+        ],
+        "summary": {
+          "passed": 2,
+          "failed": 0,
+          "total": 2,
+          "pass_rate": 1
+        }
+      },
+      "configuration": "with_skill",
+      "prompt": "Please turn this into a ticket: when I click \"Export CSV\" on the reports\npage nothing happens. I tried Chrome and Firefox. Exporting from the API\nstill works.\n",
+      "response": "Ticket written to `ticket.md`:\n\n```\nTICKET-V1\n## Summary\nClicking \"Export CSV\" on the reports page does nothing in Chrome or Firefox.\n## Severity\nP2\n## Steps to Reproduce\n1. Navigate to the reports page.\n2. Click \"Export CSV\".\n3. Nothing happens (verified in both Chrome and Firefox).\n```\n\nSeverity is **P2** because the feature is broken but a workaround exists — exporting from the API still works. If you'd like, I can add an Environment section or a note that API export still functions.",
+      "observed_version": "2.1.284"
+    },
+    {
+      "case_id": "writes-file",
+      "title": "Saves the ticket to ticket.md",
+      "status": "PASS",
+      "duration_ms": 15070,
+      "turns": 1,
+      "input_tokens": 15920,
+      "output_tokens": 258,
+      "grading": {
+        "status": "PASS",
+        "turns_executed": 1,
+        "turns_total": 1,
+        "assertion_results": [
+          {
+            "text": "expect.files_exist",
+            "passed": true,
+            "evidence": "all checks passed"
+          },
+          {
+            "text": "expect.file_contains",
+            "passed": true,
+            "evidence": "all checks passed"
+          },
+          {
+            "text": "output_matches{all:[(?m)^P3\\s*$]}",
+            "passed": true,
+            "evidence": "output satisfies all regex checks (all:[(?m)^P3\\s*$])"
+          }
+        ],
+        "summary": {
+          "passed": 3,
+          "failed": 0,
+          "total": 3,
+          "pass_rate": 1
+        }
+      },
+      "configuration": "with_skill",
+      "prompt": "Make a ticket from this: the login page shows \"Pasword\" instead of \"Password\".\n",
+      "response": "Ticket created at `ticket.md`:\n\n```\nTICKET-V1\n## Summary\nThe login page displays \"Pasword\" instead of \"Password\".\n## Severity\nP3\n## Steps to Reproduce\n1. Not provided\n```\n\nSeverity is **P3** since this is a cosmetic typo. Reproduction steps were left as \"Not provided\" since the report didn't include any.",
+      "observed_version": "2.1.284"
+    },
+    {
+      "case_id": "no-invented-steps",
+      "title": "Does not invent reproduction steps",
+      "status": "PASS",
+      "duration_ms": 17498,
+      "turns": 1,
+      "input_tokens": 16011,
+      "output_tokens": 304,
+      "judge_duration_ms": 18429,
+      "judge_input_tokens": 17094,
+      "judge_output_tokens": 507,
+      "grading": {
+        "status": "PASS",
+        "turns_executed": 1,
+        "turns_total": 1,
+        "assertion_results": [
+          {
+            "text": "The reply follows the TICKET-V1 layout with Summary, Severity and Steps to Reproduce sections",
+            "passed": true,
+            "evidence": "The final message prints the ticket content beginning with the literal header 'TICKET-V1', followed by a '## Summary' section, a '## Severity' section, and a '## Steps to Reproduce' section; The transcript's Write tool call (turn 3) writes exactly the TICKET-V1 layout to ticket.md and the assistant reply mirrors the same content; The Summary contains one sentence: 'Customers report that their saved drafts disappeared overnight.'"
+          },
+          {
+            "text": "Severity is P0 because customer data was lost",
+            "passed": true,
+            "evidence": "The ticket's Severity section reads 'P0'; The reply justifies the P0 rating explicitly: 'saved drafts vanishing is data loss, which per the severity rules is the highest priority'; The transcript (turn 1) reports that 'customers say their saved drafts disappeared overnight', which is loss of saved customer data, matching the P0 data-loss rule"
+          },
+          {
+            "text": "Steps to Reproduce does not invent concrete steps; it says the steps were not provided",
+            "passed": true,
+            "evidence": "The Steps to Reproduce section reads '1. Not provided' rather than inventing concrete reproduction steps; The reply does not fabricate any specific steps such as user actions or environment details; it acknowledges the report contained none; The skill instructions required writing '1. Not provided' when the report has no reproduction steps, and the output follows that exactly"
+          }
+        ],
+        "summary": {
+          "passed": 3,
+          "failed": 0,
+          "total": 3,
+          "pass_rate": 1
+        },
+        "judge_context": {
+          "profile": "standard",
+          "materialized_dir": "judge/context",
+          "manifest": {
+            "profile": "standard",
+            "materialized_dir": "judge/context",
+            "materials": [
+              {
+                "key": "final_message",
+                "mode": "include",
+                "path": "judge/context/final_message.txt",
+                "bytes": 290,
+                "original_bytes": 290
+              },
+              {
+                "key": "transcript",
+                "mode": "file_ref",
+                "path": "judge/context/transcript.json",
+                "bytes": 2750,
+                "original_bytes": 2750
+              },
+              {
+                "key": "workspace_diff",
+                "mode": "omit",
+                "bytes": 0
+              },
+              {
+                "key": "generated_files",
+                "mode": "omit",
+                "bytes": 0
+              }
+            ]
+          },
+          "prompt_delivery": "inline",
+          "prompt_bytes": 3015
+        }
+      },
+      "configuration": "with_skill",
+      "prompt": "Ticket please: customers say their saved drafts disappeared overnight.\n",
+      "response": "Ticket written to `ticket.md`:\n\n```\nTICKET-V1\n## Summary\nCustomers report that their saved drafts disappeared overnight.\n## Severity\nP0\n## Steps to Reproduce\n1. Not provided\n```\n\n**Severity: P0** — saved drafts vanishing is data loss, which per the severity rules is the highest priority.",
+      "observed_version": "2.1.284"
+    },
+    {
+      "case_id": "wrong-expectation",
+      "title": "Deliberately wrong expectation (fixture for FAIL)",
+      "status": "FAIL",
+      "duration_ms": 16167,
+      "turns": 1,
+      "input_tokens": 15881,
+      "output_tokens": 214,
+      "grading": {
+        "status": "FAIL",
+        "turns_executed": 1,
+        "turns_total": 1,
+        "assertion_results": [
+          {
+            "text": "output_matches.all: missing [(?m)^P0\\s*$]",
+            "passed": false,
+            "evidence": "output does not match required regex patterns: [(?m)^P0\\s*$]"
+          }
+        ],
+        "summary": {
+          "passed": 0,
+          "failed": 1,
+          "total": 1,
+          "pass_rate": 0
+        }
+      },
+      "configuration": "with_skill",
+      "prompt": "Make a ticket from this: the footer logo is 2px off-center.\n",
+      "response": "```\nTICKET-V1\n## Summary\nThe footer logo is off-center by 2px.\n## Severity\nP3\n## Steps to Reproduce\n1. Not provided\n```\n\nSaved to `ticket.md` in the current working directory.\n\n- **Severity P3** — this is a cosmetic UI glitch, not a functional failure.\n- **Steps to Reproduce** — the report didn't include any, so I marked it `Not provided` rather than inventing steps.",
+      "observed_version": "2.1.284"
+    }
+  ],
+  "total_tokens": 65402,
+  "judge_tokens": 17601,
+  "overall_tokens": 83003
+}

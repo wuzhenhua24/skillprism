@@ -110,6 +110,77 @@ class EvaluationDTO(BaseModel):
     error: str | None = None
 
 
+class RuntimeCaseRun(BaseModel):
+    """一个用例的一次运行。迭代次数大于 1 时一个用例有多条。"""
+
+    iteration: int
+    #: skill-up 的原始判定：PASS / FAIL / ERROR / SKIP。原样透传而不是映射成
+    #: EvaluationStatus——单次运行没有 incomplete 这回事，映射只会丢信息。
+    status: str
+    #: 没通过时的原因：FAIL 是没满足的断言，ERROR / SKIP 是 skill-up 给的原因。
+    #: 已去掉工作目录路径。
+    reason: str | None = None
+
+
+class RuntimeCaseResult(BaseModel):
+    """一个用例的汇总。"""
+
+    case_id: str
+    title: str = ""
+    #: 按这个用例全部运行判：有一次 FAIL 即 failed，判法同整体（见
+    #: runtime_adapter.determine_status）。
+    status: EvaluationStatus
+    #: 通过的运行数 / 总运行数。迭代次数大于 1 时，不稳定的用例靠它一眼看出来。
+    pass_rate: float
+    runs: list[RuntimeCaseRun] = Field(default_factory=list)
+
+
+class RuntimeInfo(BaseModel):
+    """这条结论是在什么配置下跑出来的。分数变了，第一个要问的就是它变没变。"""
+
+    skillup_version: str | None = None
+    engine: str | None = None
+    engine_version: str | None = None
+    model: str | None = None
+    judge_model: str | None = None
+    #: 网关实际应答的模型。请求的是别名，应答的是具体版本，两者可能不同；
+    #: 从 transcript 里尽力而为地取，取不到为空列表。
+    served_models: list[str] = Field(default_factory=list)
+    iterations: int = 1
+    #: 上面这些（不含 served_models）的摘要，也是结论身份的一部分。
+    fingerprint: str
+
+
+class RuntimeEvaluationDTO(BaseModel):
+    """一条运行时评测（Tier 3）结论。设计见 docs/runtime-evaluation.md。
+
+    ``status`` 只看运行次数判：有 FAIL 即 failed；没有 FAIL 但有运行没被判定
+    （ERROR / SKIP）是 incomplete——**不是通过**；全部 PASS 才是 passed。
+    """
+
+    skill_id: str
+    skill_version: str | None = None
+    content_hash: str
+    status: EvaluationStatus
+    evaluated_at: datetime | None = None
+    case_count: int
+    passed: int
+    failed: int
+    errored: int
+    skipped: int
+    #: 通过的运行数 / 总运行数。
+    pass_rate: float
+    runtime: RuntimeInfo
+    input_tokens: int = 0
+    output_tokens: int = 0
+    judge_tokens: int = 0
+    duration_ms: int = 0
+    cases: list[RuntimeCaseResult] = Field(default_factory=list)
+    #: 同 :attr:`EvaluationDTO.report_url`，钉住这条结论的 content_hash 与指纹。
+    report_url: str | None = None
+    error: str | None = None
+
+
 class TaskResultRef(BaseModel):
     """任务产出的一条结论的**寻址键**。
 
@@ -134,6 +205,10 @@ class TaskResultRef(BaseModel):
     #: 相同，只有它不同。原样回传给查询端点（``?context_hash=``，null 传空）
     #: 就取到确定的那条；不传则取最近评完的一条。
     context_hash: str | None = None
+    #: 只有 tier3 任务有：运行时结论的执行配置指纹，也在它的寻址键里。同一份
+    #: 内容换个模型评过就有两条结论，只带 content_hash 取到的是最近的那条。
+    #: 原样回传给 ``/runtime-evaluation?fingerprint=`` 即取到确定的那条。
+    runtime_fingerprint: str | None = None
     status: EvaluationStatus
     #: 同 :attr:`EvaluationDTO.report_url`：没配公开地址或这条结论没有报告
     #: 时为 null，不回落到内部存储地址。

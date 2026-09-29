@@ -633,6 +633,8 @@ def test_a_solo_task_addresses_its_one_result_the_same_way(client, public_domain
             "skill_id": skill_id,
             "content_hash": "hash-v1",
             "context_hash": None,
+            # 只有 tier3 任务的结论有运行时指纹。
+            "runtime_fingerprint": None,
             "status": "passed",
             "report_url": (
                 f"{PUBLIC_BASE_URL}/api/skills/{skill_id}"

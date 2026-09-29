@@ -58,6 +58,10 @@ def parse_content_headers(value: str) -> dict[str, str]:
     return headers
 
 
+#: SKILLPRISM_RUNTIME_ENV 不许碰的键，见 Settings._runtime_env_is_parseable。
+_RUNTIME_ENV_RESERVED = frozenset({"PATH", "HOME", "CLAUDE_CODE_MAX_CONTEXT_TOKENS"})
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="SKILLPRISM_", env_file=".env", extra="ignore")
 
@@ -171,6 +175,50 @@ class Settings(BaseSettings):
     shim_retries: int = 3
     shim_timeout_seconds: float = 120.0
 
+    # ---- 运行时评测（Tier 3），见 docs/runtime-evaluation.md ----
+    # 只有 sandbox worker（skillprism-worker --queue sandbox）读这一组。
+    #: skill-up CLI。从 tag 编译的单二进制，不用 install.sh——那个脚本从
+    #: GitHub 下载，出网受限的机器上装不了。
+    skillup_bin: str = "skill-up"
+    #: 钉住的 skill-up 版本。预检时核对 ``skill-up --version``，对不上拒绝
+    #: 启动：它进结论的运行时指纹，换了版本却没人知道，复用就会给出旧版本
+    #: 评出来的结论。result.json 也没有稳定性承诺，换版本要先过契约测试。
+    skillup_version: str = "0.12.0"
+    #: 评测子进程的 PATH。必须能找到 claude、bash、git。子进程不继承 worker
+    #: 的环境（见 skillup.subprocess_env），所以这里要写全。
+    runtime_path: str = ""
+    #: 钉住的 Claude Code 版本，例 ``2.1.284``。写进 eval.yaml 的
+    #: ``engine.version``，skill-up 在 ``environment: none`` 下会核对本机的
+    #: ``claude --version``，不一致直接报错。
+    runtime_engine_version: str = ""
+    #: 模型网关的 Anthropic 兼容地址（不含 ``/v1/messages``）。
+    runtime_base_url: str = ""
+    #: 网关的 key。用专门的一个并设额度：本期不隔离，agent 读得到它。
+    runtime_api_key: str = ""
+    runtime_model: str = ""
+    #: ``agent_judge`` 用的模型，留空同 ``runtime_model``。
+    runtime_judge_model: str = ""
+    #: 模型的真实上下文窗口。Claude Code 不认识非 Claude 模型名时按 200k
+    #: 自动压缩；配了就作为 CLAUDE_CODE_MAX_CONTEXT_TOKENS 传下去。
+    runtime_context_tokens: int | None = None
+    #: 每个用例跑几次。进运行时指纹：1 次和 3 次评出来的不是一种结论。
+    runtime_iterations: int = 1
+    #: skill-up 的用例并发。不进指纹——只影响快慢。
+    runtime_parallelism: int = 2
+    #: 单用例上限（秒），作者在用例里写得更大也会被压到这里。
+    runtime_case_timeout_seconds: int = 300
+    runtime_max_turns: int = 12
+    #: 用例数上限。超出直接报错、不截断：只跑前 N 个会给出一个覆盖不全、
+    #: 看起来却完整的结论。
+    runtime_max_cases: int = 20
+    #: 额外传给评测子进程的环境变量，``K=V`` 逗号分隔，同 SCANNER_ENV。
+    runtime_env: str = ""
+    #: 开跑前探活网关的超时。网关不通时 Claude Code 会一直重试，每个用例都
+    #: 耗满超时才判 ERROR，探活就是为了不白等这一轮。实测方舟上一个
+    #: max_tokens=1 的请求要 2.6～7.9s（带 thinking 的模型也要先想一下），
+    #: 10s 会误判，所以给 30s。
+    runtime_probe_timeout_seconds: float = 30.0
+
     @field_validator("gitlab_base_url")
     @classmethod
     def _gitlab_base_url_is_http(cls, value: str) -> str:
@@ -245,8 +293,63 @@ class Settings(BaseSettings):
         parse_scanner_env(value)
         return value
 
+    @field_validator("runtime_base_url")
+    @classmethod
+    def _runtime_base_url_is_http(cls, value: str) -> str:
+        """同 gitlab_base_url。写错了的表现是每个用例都耗满超时才判 ERROR。"""
+        if not value:
+            return value
+        if not value.startswith(("http://", "https://")):
+            raise ValueError(f"SKILLPRISM_RUNTIME_BASE_URL 必须是 http(s) 地址：{value!r}")
+        return value.rstrip("/")
+
+    @field_validator("runtime_env")
+    @classmethod
+    def _runtime_env_is_parseable(cls, value: str) -> str:
+        """格式之外还要挡住几个键：它们由专门的配置项给，而且进运行时指纹。
+
+        从这里塞 ``GATEWAY_MODEL`` 会静默覆盖 eval.yaml 里的模型（skill-up 的
+        ``<PROVIDER>_*`` 环境变量优先于配置文件），结论换了模型、指纹却没变，
+        复用就会把它当成同一种结论。PATH / HOME 同理，由代码决定。
+        """
+        for key, _ in _parse_pairs(value, "SKILLPRISM_RUNTIME_ENV"):
+            upper = key.upper()
+            if upper in _RUNTIME_ENV_RESERVED or upper.startswith("GATEWAY_"):
+                raise ValueError(
+                    f"SKILLPRISM_RUNTIME_ENV 不能设置 {key}：它由专门的配置项给出"
+                    "（SKILLPRISM_RUNTIME_PATH / _BASE_URL / _API_KEY / _CONTEXT_TOKENS）"
+                )
+        return value
+
+    @field_validator(
+        "runtime_iterations",
+        "runtime_case_timeout_seconds",
+        "runtime_max_turns",
+        "runtime_max_cases",
+    )
+    @classmethod
+    def _runtime_positive(cls, value: int) -> int:
+        if value < 1:
+            raise ValueError(f"运行时评测的次数、超时与上限都至少为 1：{value!r}")
+        return value
+
+    @field_validator("runtime_parallelism")
+    @classmethod
+    def _runtime_parallelism_in_range(cls, value: int) -> int:
+        """skill-up 自己只接受 1～256，超出会让每个任务都在 run 那一步失败。"""
+        if not 1 <= value <= 256:
+            raise ValueError(f"SKILLPRISM_RUNTIME_PARALLELISM 必须在 1～256 之间：{value!r}")
+        return value
+
     def scanner_env_pairs(self) -> dict[str, str]:
         return parse_scanner_env(self.scanner_env)
+
+    def runtime_env_pairs(self) -> dict[str, str]:
+        return dict(_parse_pairs(self.runtime_env, "SKILLPRISM_RUNTIME_ENV"))
+
+    @property
+    def effective_judge_model(self) -> str:
+        return self.runtime_judge_model or self.runtime_model
 
     def content_header_pairs(self) -> dict[str, str]:
         return parse_content_headers(self.content_headers)

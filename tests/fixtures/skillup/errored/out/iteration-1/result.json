@@ -1,0 +1,45 @@
+{
+  "skill_name": "run",
+  "schema_version": "v1alpha1",
+  "engine_name": "claude_code",
+  "model_name": "ark/placeholder-model",
+  "requested_configuration": {
+    "role": "runner",
+    "engine": "claude_code",
+    "protocol": "anthropic",
+    "provider": "ark",
+    "model": "placeholder-model"
+  },
+  "applied_configuration": {
+    "role": "runner",
+    "engine": "claude_code",
+    "protocol": "anthropic",
+    "provider": "ark",
+    "model": "placeholder-model"
+  },
+  "observed_configuration": {
+    "version": "2.1.284"
+  },
+  "start_time": "2026-09-29T10:33:34.226706+08:00",
+  "end_time": "2026-09-29T10:34:34.345935+08:00",
+  "case_results": [
+    {
+      "case_id": "basic-format",
+      "title": "Produces the fixed ticket layout",
+      "status": "ERROR",
+      "duration_ms": 59988,
+      "turns": 0,
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "error": "agent execution failed: claude-code run failed: context deadline exceeded (case timeout 60s via cases.defaults.timeout_seconds)",
+      "grading": null,
+      "configuration": "with_skill",
+      "prompt": "Please turn this into a ticket: when I click \"Export CSV\" on the reports\npage nothing happens. I tried Chrome and Firefox. Exporting from the API\nstill works.\n",
+      "response": "\"placeholder-model\" isn't described by this version's model catalog; update Claude Code, or map it with behavesAs on a modelPicker row (or modelOverrides, if it is a provider id of a model this version knows). Until then auto-compact keeps this session within 200k tokens (the context window it assumes); if the model accepts more, append [1m] to the model name for 1M, or set CLAUDE_CODE_MAX_CONTEXT_TOKENS to its real window; CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT=1 restores the previous wait-for-the-API behavior.\n[claude-code:unrecognized_model] {\"model\":\"placeholder-model\",\"query_source\":\"sdk\"}\n",
+      "observed_version": "2.1.284"
+    }
+  ],
+  "total_tokens": 0,
+  "judge_tokens": 0,
+  "overall_tokens": 0
+}
