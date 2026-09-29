@@ -1,0 +1,17 @@
+# 【准备工作区】用例需要文件时，把它们放在 evals/fixtures/ 下，
+# 用 context.repo_fixture 把整个目录拷进 agent 的工作目录。
+# 路径相对 skill 根目录（SKILL.md 所在目录），不是相对这个用例文件。
+title: Reads the report from a log file
+input:
+  prompt: |
+    The on-call engineer left a note in incident.log. Turn it into a ticket.
+context:
+  repo_fixture: evals/fixtures/repos/service-logs
+expect:
+  files_exist: ["ticket.md"]
+judge:
+  type: rule_based
+  success:
+    - output_matches:
+        # 日志里写的是用户数据被删，按 SKILL.md 是 P0。
+        all: ["(?m)^TICKET-V1\\s*$", "(?m)^P0\\s*$"]

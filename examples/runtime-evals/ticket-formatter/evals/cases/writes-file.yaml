@@ -1,0 +1,16 @@
+# 【产出文件】skill 要求把结果写进文件时，检查文件在不在、内容对不对。
+title: Saves the ticket to ticket.md
+input:
+  prompt: |
+    Make a ticket from this: the login page shows "Pasword" instead of "Password".
+expect:
+  files_exist: ["ticket.md"]
+  file_contains:
+    - path: ticket.md
+      content: "TICKET-V1"
+judge:
+  type: rule_based
+  success:
+    - output_matches:
+        # 错别字属于外观问题，按 SKILL.md 是 P3。
+        all: ["(?m)^P3\\s*$"]

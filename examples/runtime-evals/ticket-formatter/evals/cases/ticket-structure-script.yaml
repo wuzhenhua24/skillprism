@@ -1,0 +1,13 @@
+# 【脚本判分】规则写不下的检查（比如"各节按顺序出现、严重级别只能是四个值之一"）
+# 用脚本判：退出码 0 为通过，脚本的输出会作为判定理由出现在结果里。
+# 脚本放在 evals/fixtures/scripts/ 下，工作目录是 agent 的工作目录，
+# 可用 $EVAL_FINAL_MESSAGE 读 agent 的最终回复。
+title: ticket.md has every section in order
+input:
+  prompt: |
+    File a ticket: the dashboard takes 40 seconds to load for every user since
+    this morning's deploy. Rolling back fixes it.
+judge:
+  type: script
+  script_path: evals/fixtures/scripts/check-ticket.sh
+  timeout_seconds: 30

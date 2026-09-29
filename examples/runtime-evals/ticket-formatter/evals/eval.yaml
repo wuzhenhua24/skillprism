@@ -1,0 +1,22 @@
+# 只给你自己在本地调试用：SkillPrism 平台不读这个文件，
+# agent、模型、运行环境、并发都由平台统一决定。
+# 本地跑：skill-up validate ./evals/eval.yaml && skill-up run ./evals/eval.yaml
+schema_version: v1alpha1
+environment:
+  type: none
+engine:
+  name: claude_code
+  model:
+    provider: anthropic
+    name: claude-sonnet-4-6        # 换成你能用的模型
+cases:
+  files:
+    - evals/cases/basic-format.yaml
+    - evals/cases/writes-file.yaml
+    - evals/cases/from-log-file.yaml
+    - evals/cases/ticket-structure-script.yaml
+    - evals/cases/no-invented-steps.yaml
+    - evals/cases/not-a-bug-report.yaml
+  defaults:
+    timeout_seconds: 300
+    max_turns: 12

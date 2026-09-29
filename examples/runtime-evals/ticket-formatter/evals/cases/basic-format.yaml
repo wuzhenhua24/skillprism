@@ -1,0 +1,17 @@
+# 【最常用】回答内容要符合 skill 规定的格式。
+# expect 是便宜的前置检查，不过就直接判失败、不进 judge；
+# rule_based 用正则判关键内容，确定、不花 token。
+title: Produces the fixed ticket layout
+input:
+  prompt: |
+    Please turn this into a ticket: when I click "Export CSV" on the reports
+    page nothing happens. I tried Chrome and Firefox. Exporting from the API
+    still works.
+expect:
+  must_contain: ["TICKET-V1", "## Summary", "## Severity", "## Steps to Reproduce"]
+judge:
+  type: rule_based
+  success:
+    - output_matches:
+        # (?m) 让 ^ $ 按行匹配。有替代方案（API 能导出），按 SKILL.md 是 P2。
+        all: ["(?m)^TICKET-V1\\s*$", "(?m)^P2\\s*$"]

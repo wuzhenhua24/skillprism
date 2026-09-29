@@ -1,0 +1,16 @@
+# 【语义判断】需要"理解"才能判的，用 agent_judge：另一个模型按 criteria 打分。
+# 每个用例多花约 1.6 万 token、结论有随机性，能用上面几种判的就别用它。
+# model 在平台上会被替换成平台的 judge 模型；本地跑时要写一个你能用的，
+# 例如 anthropic/<模型名>，否则 skill-up validate 不过。
+title: Does not invent reproduction steps
+input:
+  prompt: |
+    Ticket please: customers say their saved drafts disappeared overnight.
+judge:
+  type: agent_judge
+  model: anthropic/claude-sonnet-4-6
+  criteria:
+    - "The reply follows the TICKET-V1 layout with Summary, Severity and Steps to Reproduce sections"
+    - "Severity is P0 because customer data was lost"
+    - "Steps to Reproduce does not invent concrete steps; it says the steps were not provided"
+  pass_threshold: 0.7

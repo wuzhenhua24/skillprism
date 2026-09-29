@@ -1,0 +1,4 @@
+2026-09-28 02:14:07 ERROR cleanup-job: deleted 1,284 rows from user_documents (expected 0)
+2026-09-28 02:14:07 ERROR cleanup-job: retention filter evaluated to NULL, matched all rows
+2026-09-28 08:30:11 WARN  support: 37 customers report that their saved documents are gone
+note from on-call: the nightly cleanup job wiped real user documents. No backup restore yet.

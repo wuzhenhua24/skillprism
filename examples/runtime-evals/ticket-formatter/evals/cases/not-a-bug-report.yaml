@@ -1,0 +1,18 @@
+# 【不该触发】边界情况：用户没让你建工单时，skill 不该自作主张。
+# failure 里任何一条命中就直接判失败，优先于 success。
+title: Answers a question without filing a ticket
+input:
+  prompt: |
+    Quick question, no ticket needed: in your severity scale, what is the
+    difference between P1 and P2?
+expect:
+  files_not_exist: ["ticket.md"]
+judge:
+  type: rule_based
+  failure:
+    - output_matches:
+        any: ["(?m)^TICKET-V1\\s*$"]
+  success:
+    - output_contains:
+        all: ["P1", "P2"]
+        any: ["workaround", "work around", "Workaround"]

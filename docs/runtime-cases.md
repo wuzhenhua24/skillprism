@@ -4,6 +4,9 @@ SkillPrism 的运行时评测（Tier 3）会把你的 skill 装进一个真实�
 用你写的用例去问它，再按你写的断言判它做得对不对。**用例由你写，放在 skill 里。**
 没有用例的 skill 不做运行时评测，结果页会提示「无运行时用例」。
 
+**可以直接拷的完整示例**在 [examples/runtime-evals/](../examples/runtime-evals/)：一个 skill
+加 6 个用例，覆盖下面每种写法，实测在平台上全部通过。
+
 用例格式是 [skill-up](https://github.com/alibaba/skill-up) 的 `cases/*.yaml`，完整语法见它的
 [Writing Evals](https://alibaba.github.io/skill-up/guide/writing-evals)。这一页只讲在
 SkillPrism 上要注意的差别。
